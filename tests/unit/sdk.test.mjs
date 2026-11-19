@@ -298,6 +298,20 @@ test('JSON parse errors and body timeouts have stable codes', async () => {
   } finally { globalThis.fetch = original; }
 });
 
+test('aborting during a fetch response body reports cancellation', async () => {
+  const original = globalThis.fetch;
+  const abort = new AbortController();
+  try {
+    globalThis.fetch = async (_url, { signal }) => new Response(new ReadableStream({
+      pull(body) {
+        abort.abort();
+        body.error(signal.reason);
+      },
+    }, { highWaterMark: 0 }));
+    await assert.rejects(capabilities({ signal: abort.signal }), { code: 'CANCELED', reason: 'canceled' });
+  } finally { globalThis.fetch = original; }
+});
+
 test('HTTP error bodies distinguish screenshot contention from service failure', async () => {
   const original = globalThis.fetch;
   try {

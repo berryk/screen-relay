@@ -188,32 +188,26 @@ async function request<Result>(
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => { controller.abort(); reject(new RelayError('timeout', 'The request timed out.')); }, server.timeout);
   });
+  const fail = (error: unknown, fallback: (error: unknown) => RelayError): never => {
+    if (server.signal?.aborted) throw new RelayError('canceled', 'Request canceled.');
+    if (controller.signal.aborted) throw new RelayError('timeout', 'The request timed out.');
+    if (error instanceof RelayError) throw error;
+    throw fallback(error);
+  };
   const operation = (async () => {
-    try {
-      const response = await fetch(new URL(path, server.base), {
-        signal: server.signal ? AbortSignal.any([controller.signal, server.signal]) : controller.signal,
-        redirect: 'error', headers: headers(server, body),
-        method: body === undefined ? 'GET' : 'POST', body: body === undefined ? undefined : Buffer.from(body),
-      });
-      if (response.ok && binary && !response.body) throw new RelayError('protocol_error', 'Missing screenshot body');
-      let data: Buffer;
-      try { data = await readResponseBody(response); }
-      catch (error) {
-        if (error instanceof RelayError) throw error;
-        throw disconnectedResponse();
-      }
-      if (!response.ok) {
-        let detail: { error?: string; index?: number } | null = null;
-        try { detail = JSON.parse(data.toString('utf8')); } catch {}
-        throw responseError(response.status, detail);
-      }
-      return decode<Result>(data, binary);
-    } catch (error) {
-      if (error instanceof RelayError) throw error;
-      if (server.signal?.aborted) throw new RelayError('canceled', 'Request canceled.');
-      if (controller.signal.aborted) throw new RelayError('timeout', 'The request timed out.');
-      throw networkError(error);
+    const response = await fetch(new URL(path, server.base), {
+      signal: server.signal ? AbortSignal.any([controller.signal, server.signal]) : controller.signal,
+      redirect: 'error', headers: headers(server, body),
+      method: body === undefined ? 'GET' : 'POST', body: body === undefined ? undefined : Buffer.from(body),
+    }).catch(error => fail(error, networkError));
+    if (response.ok && binary && !response.body) throw new RelayError('protocol_error', 'Missing screenshot body');
+    const data = await readResponseBody(response).catch(error => fail(error, disconnectedResponse));
+    if (!response.ok) {
+      let detail: { error?: string; index?: number } | null = null;
+      try { detail = JSON.parse(data.toString('utf8')); } catch {}
+      throw responseError(response.status, detail);
     }
+    return decode<Result>(data, binary);
   })();
   try { return await Promise.race([operation, deadline]); } finally { clearTimeout(timer); }
 }
