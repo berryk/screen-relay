@@ -22,7 +22,7 @@ const { resolveBackend, sessionNeeds, splitCommand } = await import(pathToFileUR
 const commandsBundle = buildSync({ entryPoints: [join(root, 'src/cli/host/session_commands.ts')], bundle: true, platform: 'node', format: 'esm', banner: nodeBanner, write: false });
 const commandsPath = join(directory, 'session-commands.mjs');
 writeFileSync(commandsPath, commandsBundle.outputFiles[0].contents);
-const { cmdDown } = await import(pathToFileURL(commandsPath).href);
+const { cmdDown, cmdStatus } = await import(pathToFileURL(commandsPath).href);
 
 test('a Linux session needs setpriv even when it attaches to a display with no desktop', () => {
   const previous = process.env.PATH;
@@ -157,6 +157,35 @@ test('down persists Wayland cleanup without rewriting a stopped session again', 
     writeFileSync(file, preserved);
     await cmdDown({ command: 'down', json: true, name: 'wayland-cleanup' });
     assert.equal(readFileSync(file, 'utf8'), preserved);
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('status JSON omits the Wayland runtime identity without changing the session', async () => {
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(directory, 'status');
+  const runtime = mkdtempSync(join(tmpdir(), 'relay-status-'));
+  try {
+    const sessionDir = state.stateDir('wayland-status');
+    mkdirSync(sessionDir, { recursive: true });
+    const runtimeIdentity = { dev: '1', ino: '2', uid: '3' };
+    state.writeSession(sessionDir, {
+      state: 'stopped', backend: 'wayland', runtimeDir: runtime, waylandDisplay: 'wayland-1', runtimeIdentity,
+      components: { engine: { pid: 1, start: null } },
+    });
+    const writes = [];
+    const write = process.stdout.write;
+    process.stdout.write = (chunk) => { writes.push(String(chunk)); return true; };
+    try { await cmdStatus({ command: 'status', json: true, name: 'wayland-status' }); }
+    finally { process.stdout.write = write; }
+    const { session } = JSON.parse(writes.join(''));
+    assert.equal('runtimeIdentity' in session, false);
+    assert.equal('components' in session, false);
+    assert.equal(session.runtimeDir, runtime);
+    assert.deepEqual(state.readSession('wayland-status').runtimeIdentity, runtimeIdentity);
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

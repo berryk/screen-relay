@@ -201,6 +201,7 @@ export async function cmdStatus(args: Args): Promise<number> {
   const running = alive(session.supervisor);
   if (['starting', 'ready'].includes(session.state) && !running) session.state = 'failed';
   delete session.components;
+  delete session.runtimeIdentity;
   session.running = running && session.state === 'ready';
   if (!args['show-token']) delete session.token;
   if (args['show-token'] && session.tokenFile && running) session.token = readFileSync(session.tokenFile, 'utf8').trim();
