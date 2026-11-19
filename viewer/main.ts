@@ -779,7 +779,11 @@ panels.keys.addEventListener('click', (e) => {
 panels.connection.addEventListener('submit', (e) => {
   e.preventDefault();
   const value = (document.querySelector('#access-token') as HTMLInputElement).value.trim();
-  if (value && (!validToken(value) || !trustedPage)) {
+  if (!value || (validToken(value) && trustedPage)) {
+    viewOnly = false;
+    takeRequested = false;
+    applyControl();
+  } else {
     setStatus('Use a 64-character token over HTTPS or a localhost tunnel');
     return;
   }

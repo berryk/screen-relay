@@ -689,6 +689,19 @@ test('a refused handshake does not flash a connection error', () => {
   assert.equal(app.sockets.at(-1).url, 'ws://localhost/stream?view=1');
 });
 
+test('a token submitted in the connection form starts a fresh control-capable connection', () => {
+  const app = viewer();
+  app.sockets[0].onclose({ code: 1006 });
+  const token = app.document.querySelector('#access-token');
+  token.value = 'a'.repeat(64);
+  app.document.querySelector('#connection-panel').handlers.submit({ preventDefault() {} });
+  const target = new URL(app.sockets.at(-1).url);
+  assert.equal(target.pathname, '/stream');
+  assert.equal(target.searchParams.has('view'), false);
+  assert.equal(target.searchParams.has('take'), false);
+  assert.equal(app.document.querySelector('#toolbar-actions').querySelector('[data-action="control"]').attributes['aria-label'], 'Release control');
+});
+
 test('an automatic reconnect claims idle input without taking it from another owner', () => {
   const app = viewer();
   assert.equal(app.sockets.at(-1).url, 'ws://localhost/stream');
