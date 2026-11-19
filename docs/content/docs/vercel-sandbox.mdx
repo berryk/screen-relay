@@ -47,7 +47,7 @@ The sandbox runs Ubuntu 26.04 on x86_64 as the `ubuntu` user, which has password
    sandbox exec screen-relay sh -c 'screen-relay screenshot /tmp/screen.png'
    ```
 
-   The PNG is saved inside the sandbox. To control the desktop from your laptop, [install the screen-relay CLI and save the token from the viewer link in a private file](/docs/remote-access#control-a-session-from-your-laptop):
+   The PNG is saved inside the sandbox. To control the desktop from your laptop, [install the screen-relay CLI and save the token from the viewer link in a private file](/docs/remote-access#control-a-session-from-your-laptop). Run the following command in the same shell where you saved the token:
 
    ```sh
    screen-relay screenshot screen.png --url https://sb-xxxx.vercel.run --token-file "$relay_token_dir/token"
