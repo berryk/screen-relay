@@ -17,7 +17,7 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 
 const bundle = buildSync({
   stdin: {
-    contents: "export { cmdDoctor } from './src/cli/host/doctor.ts'; export { cmdInstall } from './src/cli/host/setup.ts'; export { cmdDown, cmdLogs, cmdRun, cmdUp } from './src/cli/host/session_commands.ts'; export { engineDirectory, requireHost, which } from './src/cli/host/common.ts'; export { compiledBackends, findEngine, requestedBackend, Session } from './src/cli/host/supervisor.ts'; export { alive, identity, lock, stateDir, writeSession } from './src/cli/host/state.ts'; export { engineEnvironment, killTree, MSYS2_CHECKED, MSYS2_PATH, msys2Fix, msys2Shell, trustedAcl, windowsSessionId } from './src/cli/host/windows.ts';",
+    contents: "export { cmdDoctor } from './src/cli/host/doctor.ts'; export { cmdInstall } from './src/cli/host/setup.ts'; export { cmdDown, cmdLogs, cmdRun, cmdUp } from './src/cli/host/session_commands.ts'; export { engineDirectory, requireHost, which } from './src/cli/host/common.ts'; export { compiledBackends, findEngine, requestedBackend, Session } from './src/cli/host/supervisor.ts'; export { alive, identity, lock, stateDir, writeSession } from './src/cli/host/state.ts'; export { createPrivateMsys2Root, engineEnvironment, killTree, MSYS2_PATH, msys2Fix, msys2Shell, probeMsys2Tree, trustedAcl, windowsSessionId } from './src/cli/host/windows.ts';",
     resolveDir: root,
   },
   bundle: true,
@@ -29,7 +29,7 @@ const bundle = buildSync({
 });
 const bundlePath = join(directory, 'windows.mjs');
 writeFileSync(bundlePath, bundle.outputFiles[0].contents);
-const { alive, cmdDown, cmdInstall, cmdLogs, cmdRun, cmdUp, compiledBackends, engineDirectory, engineEnvironment, findEngine, identity, killTree, lock, MSYS2_CHECKED, MSYS2_PATH, msys2Fix, msys2Shell, requestedBackend, requireHost, Session, stateDir, trustedAcl, which, windowsSessionId, writeSession } = await import(pathToFileURL(bundlePath).href);
+const { alive, cmdDown, cmdInstall, cmdLogs, cmdRun, cmdUp, compiledBackends, createPrivateMsys2Root, engineDirectory, engineEnvironment, findEngine, identity, killTree, lock, MSYS2_PATH, msys2Fix, msys2Shell, probeMsys2Tree, requestedBackend, requireHost, Session, stateDir, trustedAcl, which, windowsSessionId, writeSession } = await import(pathToFileURL(bundlePath).href);
 
 function onWindowsProcess(script) {
   const probe = `Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -159,11 +159,10 @@ test('a tree that the signed-in account, SYSTEM or Administrators owns and no ot
     { sid: USERS, name: 'BUILTIN\\Users', rights: READ },
     { sid: 'S-1-3-0', name: 'CREATOR OWNER', rights: FULL },
   ];
-  const directoryRules = [...rules, { sid: USERS, name: 'BUILTIN\\Users', rights: CREATE_DIRECTORY }];
   const directories = ['C:\\msys64', 'C:\\msys64\\usr', 'C:\\msys64\\usr\\bin'];
   for (const owner of [ACCOUNT, SYSTEM, ADMINISTRATORS]) {
     const objects = [
-      ...directories.map((path) => ({ path, kind: 'directory', owner, ownerName: 'owner', rules: directoryRules })),
+      ...directories.map((path) => ({ path, kind: 'directory', owner, ownerName: 'owner', rules })),
       { path: 'C:\\msys64\\usr\\bin\\bash.exe', kind: 'file', owner, ownerName: 'owner', rules },
     ];
     assert.deepEqual(trustedAcl({ current: ACCOUNT, objects }), { trusted: true });
@@ -174,6 +173,12 @@ test('a file that another account can append to is refused, since the login prof
   const rules = [{ sid: USERS, name: 'BUILTIN\\Users', rights: CREATE_DIRECTORY }];
   const verdict = trustedAcl({ current: ACCOUNT, objects: [{ path: 'C:\\msys64\\etc\\profile', kind: 'file', owner: SYSTEM, ownerName: 'NT AUTHORITY\\SYSTEM', rules }] });
   assert.deepEqual(verdict, { trusted: false, reason: 'C:\\msys64\\etc\\profile lets BUILTIN\\Users write to it.' });
+});
+
+test('a directory that another account can create subdirectories in is refused, since the tree covers what they add', () => {
+  const rules = [{ sid: USERS, name: 'BUILTIN\\Users', rights: CREATE_DIRECTORY }];
+  const verdict = trustedAcl({ current: ACCOUNT, objects: [{ path: 'C:\\msys64', kind: 'directory', owner: SYSTEM, ownerName: 'NT AUTHORITY\\SYSTEM', rules }] });
+  assert.deepEqual(verdict, { trusted: false, reason: 'C:\\msys64 lets BUILTIN\\Users write to it.' });
 });
 
 test('a rule that grants another account a generic write right is refused', () => {
@@ -203,16 +208,56 @@ test('an MSYS2 tree owned by another account gets the same delete-and-reinstall 
   assert.ok(!fix.includes('icacls'));
 });
 
-test('setup checks the shell, login scripts, command files and searched directories before it runs MSYS2', () => {
-  assert.equal(MSYS2_PATH.split(':')[0], '/usr/local/bin');
-  const checked = new Set(MSYS2_CHECKED.map((path) => path.toLowerCase()));
-  const paths = ['C:\\msys64\\usr\\bin\\bash.exe', 'C:\\msys64\\etc\\profile', 'C:\\msys64\\etc\\bash.bashrc', 'C:\\msys64\\etc\\profile.d',
-    'C:\\msys64\\usr\\bin\\make.exe', 'C:\\msys64\\usr\\bin\\pacman.exe', 'C:\\msys64\\usr\\bin\\pacman-key',
-    'C:\\msys64\\ucrt64\\bin\\gcc.exe', 'C:\\msys64\\ucrt64\\bin\\g++.exe', 'C:\\msys64\\ucrt64\\bin\\pkgconf.exe', 'C:\\msys64\\usr\\bin\\pkg-config.exe'];
-  for (const directory of MSYS2_PATH.split(':')) paths.push(`C:\\msys64${directory.replaceAll('/', '\\')}`);
-  for (const path of paths) assert.ok(checked.has(path.toLowerCase()), `${path} is used but not checked`);
-  assert.ok(checked.has('c:\\msys64'));
-  assert.ok(!checked.has('c:'));
+test('setup searches the MSYS2 command directories in its own order', () => {
+  assert.deepEqual(MSYS2_PATH.split(':'), ['/usr/local/bin', '/usr/bin', '/ucrt64/bin']);
+});
+
+test('a private MSYS2 root and its real children read as trusted, and each child ACL is read on its own', { skip: process.platform !== 'win32' }, () => {
+  const parent = mkdtempSync(join(directory, 'msys2-private-'));
+  const root = join(parent, 'root');
+  try {
+    const discard = createPrivateMsys2Root(root);
+    assert.equal(typeof discard, 'function');
+    const rootProbe = probeMsys2Tree(root);
+    assert.ok(rootProbe);
+    assert.deepEqual(trustedAcl(rootProbe), { trusted: true });
+    const shell = join(root, 'usr', 'bin', 'bash.exe');
+    assert.equal(probeMsys2Tree(root, shell), null);
+
+    const bin = join(root, 'usr', 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(shell, '');
+    const treeProbe = probeMsys2Tree(root, shell);
+    assert.ok(treeProbe);
+    assert.deepEqual(trustedAcl(treeProbe), { trusted: true });
+    const objectAt = (probe, path) => probe.objects.find((object) => object.path.replace(/[\\/]+$/, '').toLowerCase() === path.replace(/[\\/]+$/, '').toLowerCase());
+    assert.equal(objectAt(treeProbe, shell)?.kind, 'file');
+
+    const nested = join(root, 'opt');
+    mkdirSync(nested);
+    const icacls = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'icacls.exe');
+    const applied = spawnSync(icacls, [nested, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', `*${rootProbe.current}:(OI)(CI)F`], { encoding: 'utf8' });
+    assert.equal(applied.status, 0, applied.stderr);
+    const nestedFile = join(nested, 'note.txt');
+    writeFileSync(nestedFile, '');
+    const nestedProbe = probeMsys2Tree(root);
+    assert.ok(nestedProbe);
+    assert.deepEqual(trustedAcl(nestedProbe), { trusted: true });
+    const nestedObject = objectAt(nestedProbe, nested);
+    const nestedFileObject = objectAt(nestedProbe, nestedFile);
+    const rootObject = objectAt(nestedProbe, root);
+    assert.ok(nestedObject);
+    assert.ok(nestedFileObject);
+    assert.ok(rootObject);
+    assert.notDeepEqual(nestedObject.rules, rootObject.rules);
+
+    rmSync(join(root, 'usr'), { recursive: true, force: true });
+    rmSync(nested, { recursive: true, force: true });
+    assert.equal(discard(), true);
+    assert.equal(existsSync(root), false);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test('setup refuses an MSYS2 shell it cannot vouch for', { skip: process.platform === 'win32' }, async () => {

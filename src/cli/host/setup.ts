@@ -11,7 +11,7 @@ import { engineDirectory, isLinux, LAUNCHER_DIR, requireHost, run, which, type H
 import { detectFamily, groupPackages, installCommand, packagesFor, provides } from './packages.js';
 import { claimLock, lockOwnerAlive } from './state.js';
 import { compiledBackends, findEngine, requestedBackend, sessionNeeds } from './supervisor.js';
-import { createPrivateMsys2Root, MSYS2_PATH, MSYS2_ROOT, msys2Failure, msys2Installation, msys2Shell, wingetPath } from './windows.js';
+import { createPrivateMsys2Root, forgetMsys2Installation, MSYS2_PATH, MSYS2_ROOT, msys2Failure, msys2Installation, msys2Shell, wingetPath } from './windows.js';
 
 type Backend = (typeof BACKENDS)[number];
 type Args = HostArgs & Record<string, any>;
@@ -141,7 +141,11 @@ function packageWork(groups: string[], args: Args): { manager: string; packages:
           }
         }
         const keyring = '{ [ -d /etc/pacman.d/gnupg ] || { pacman-key --init && pacman-key --populate msys2 && gpgconf --kill all; }; }';
-        await step('Installing MSYS2 packages', 'Installed MSYS2 packages', `${keyring} && pacman -Sy --noconfirm --needed ${MSYS2_PACKAGES.join(' ')}`, args);
+        try {
+          await step('Installing MSYS2 packages', 'Installed MSYS2 packages', `${keyring} && pacman -Sy --noconfirm --needed ${MSYS2_PACKAGES.join(' ')}`, args);
+        } finally {
+          forgetMsys2Installation();
+        }
       },
     };
   }
