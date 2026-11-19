@@ -23,6 +23,7 @@
 namespace relay {
 struct HttpResponse {
   unsigned char body[2048], input[max_input_batch * 16];
+  char pending_ticket[2 * Tickets::bytes + 1];
   size_t length, input_length, input_expected;
   std::vector<uint8_t>* image;
   std::string* upload;

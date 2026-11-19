@@ -30,13 +30,18 @@ class Tickets {
  public:
   using Clock = std::chrono::steady_clock;
   static constexpr size_t capacity = 16;
+  static constexpr size_t bytes = 32;
   static constexpr std::chrono::seconds lifetime{60};
   /** Keeps a ticket; the oldest goes when capacity are already waiting. */
   void add(const std::string& ticket, Clock::time_point now);
+  /** Checks whether a ticket is still valid without using it. */
+  bool available(const std::string& ticket, Clock::time_point now) const;
   /** Uses up a ticket; false when it is unknown, used, or expired. */
   bool redeem(const std::string& ticket, Clock::time_point now);
  private:
-  std::vector<std::pair<std::string, Clock::time_point>> waiting;
+  using Entries = std::vector<std::pair<std::string, Clock::time_point>>;
+  Entries waiting;
+  Entries::const_iterator find(const std::string& ticket, Clock::time_point now) const;
   void expire(Clock::time_point now);
 };
 /**

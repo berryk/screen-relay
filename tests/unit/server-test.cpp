@@ -55,9 +55,12 @@ int main() {
     Tickets tickets;
     const auto start = Tickets::Clock::now();
     tickets.add("a", start);
+    assert(!tickets.available("b", start) && !tickets.available("", start));
     assert(!tickets.redeem("b", start) && !tickets.redeem("", start));
-    assert(tickets.redeem("a", start) && !tickets.redeem("a", start));
+    assert(tickets.available("a", start));
+    assert(tickets.redeem("a", start) && !tickets.available("a", start) && !tickets.redeem("a", start));
     tickets.add("late", start);
+    assert(!tickets.available("late", start + Tickets::lifetime));
     assert(!tickets.redeem("late", start + Tickets::lifetime));
     for (size_t i = 0; i <= Tickets::capacity; ++i) tickets.add("t" + std::to_string(i), start);
     assert(!tickets.redeem("t0", start) && tickets.redeem("t1", start));

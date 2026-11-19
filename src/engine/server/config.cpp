@@ -175,13 +175,20 @@ void Tickets::add(const std::string& ticket, Clock::time_point now) {
   if (waiting.size() >= capacity) waiting.erase(waiting.begin());
   waiting.emplace_back(ticket, now + lifetime);
 }
+Tickets::Entries::const_iterator Tickets::find(const std::string& ticket, Clock::time_point now) const {
+  if (ticket.empty()) return waiting.end();
+  return std::find_if(waiting.begin(), waiting.end(), [&](const auto& entry) {
+    return now < entry.second && secretEqual(entry.first, ticket);
+  });
+}
+bool Tickets::available(const std::string& ticket, Clock::time_point now) const {
+  return find(ticket, now) != waiting.end();
+}
 bool Tickets::redeem(const std::string& ticket, Clock::time_point now) {
-  expire(now);
-  if (ticket.empty()) return false;
-  for (auto entry = waiting.begin(); entry != waiting.end(); ++entry) {
-    if (secretEqual(entry->first, ticket)) { waiting.erase(entry); return true; }
-  }
-  return false;
+  const auto entry = find(ticket, now);
+  if (entry == waiting.end()) return false;
+  waiting.erase(entry);
+  return true;
 }
 std::string offeredTicket(lws* wsi) {
   std::istringstream protocols(header(wsi, WSI_TOKEN_PROTOCOL));

@@ -503,7 +503,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         }
         if (!localRequest(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_FORBIDDEN, "forbidden");
         if (!authenticated(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_UNAUTHORIZED, "unauthorized");
-        unsigned char bytes[32];
+        unsigned char bytes[Tickets::bytes];
         if (!secureRandom(bytes, sizeof(bytes))) return errorResponse(wsi, response, HTTP_STATUS_INTERNAL_SERVER_ERROR, "random_failed");
         static const char digits[] = "0123456789abcdef";
         std::string ticket;
@@ -620,16 +620,24 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       const Target parsed = viewerTarget(target);
       if (parsed.socket == Socket::none || !localRequest(s->config, wsi) || s->nextGeneration == UINT32_MAX) return 1;
       if (!s->planConnection(parsed.socket).open && parsed.socket != Socket::control) return 1;
-      // Check a ticket only for a connection that would open, so a refused
-      // one doesn't use it up.
-      if (!authenticated(s->config, wsi, true) && !s->tickets.redeem(offeredTicket(wsi), Tickets::Clock::now())) return 1;
       auto* response = static_cast<HttpResponse*>(user);
+      response->pending_ticket[0] = '\0';
+      if (!authenticated(s->config, wsi, true)) {
+        const auto ticket = offeredTicket(wsi);
+        if (ticket.size() != 2 * Tickets::bytes || !s->tickets.available(ticket, Tickets::Clock::now())) return 1;
+        std::memcpy(response->pending_ticket, ticket.c_str(), ticket.size() + 1);
+      }
       response->socket = parsed.socket; response->clipboard = parsed.clipboard;
       return 0;
     }
     case LWS_CALLBACK_ESTABLISHED: {
       if (s->nextGeneration == UINT32_MAX) return -1;
-      const auto* response = static_cast<HttpResponse*>(user);
+      auto* response = static_cast<HttpResponse*>(user);
+      if (!response) return -1;
+      const std::string ticket(response->pending_ticket);
+      std::memset(response->pending_ticket, 0, sizeof(response->pending_ticket));
+      const auto now = Tickets::Clock::now();
+      if (!ticket.empty() && !s->tickets.available(ticket, now)) return -1;
       const Socket socket = response->socket;
       const auto plan = s->planConnection(socket);
       if (!plan.open) {
@@ -640,9 +648,10 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         s->control = wsi; s->control_generation = ++s->nextGeneration; s->control_received.clear();
         s->input->resetLocks();
         s->control_ready = true; lws_callback_on_writable(wsi);
-        return 0;
+      } else if (s->startStream(wsi, socket, plan, response->clipboard) < 0) {
+        return -1;
       }
-      return s->startStream(wsi, socket, plan, response->clipboard);
+      return ticket.empty() || s->tickets.redeem(ticket, now) ? 0 : -1;
     }
     case LWS_CALLBACK_RECEIVE: {
       if (s->closing.count(wsi)) return 0;
