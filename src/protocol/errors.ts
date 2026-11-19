@@ -149,12 +149,13 @@ export function responseError(status: number, detail: unknown): RelayError {
     screenshot_unavailable: 'The engine could not take a screenshot. Read the engine log with screen-relay logs engine.',
     invalid_text: 'The clipboard text must be UTF-8 without NUL characters.',
     too_large: 'The text is larger than the engine accepts.',
-    clipboard_busy: 'The desktop clipboard request queue is full. Retry shortly.',
+    clipboard_busy: 'The desktop clipboard request queue is full.',
     clipboard_too_large: 'The desktop clipboard exceeds the 256 KiB read limit.',
   };
   const message = (typeof body.error === 'string' && Object.hasOwn(details, body.error) ? details[body.error] : undefined)
     ?? messages[reason] ?? 'The engine could not complete the request.';
   return new RelayError(reason, message, {
+    ...(body.error === 'clipboard_busy' ? { hint: 'Wait briefly, then retry.' } : {}),
     data: { httpStatus: status, ...(index === undefined ? {} : { index }), ...(applied === undefined ? {} : { applied }) },
   });
 }
