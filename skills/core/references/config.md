@@ -22,6 +22,7 @@ Precedence, highest first:
 | `server.port` | `8080` | `1..65535` | `SCREEN_RELAY_PORT` |
 | `server.bind` | `127.0.0.1` | Listen address | `SCREEN_RELAY_BIND` |
 | `server.public` | none | HTTPS origin without a path, query or credentials | `SCREEN_RELAY_PUBLIC` |
+| `server.allow_origin` | none | Up to 16 comma-separated exact origins for browser WebSocket connections. Use lowercase HTTPS origins or HTTP origins on `localhost` and `127.0.0.1`. Requires a token. | `SCREEN_RELAY_ALLOW_ORIGIN` |
 | `server.tls_cert` | none | Certificate file; `server.tls_key` must be set too | `SCREEN_RELAY_TLS_CERT` |
 | `server.tls_key` | none | Private key file | `SCREEN_RELAY_TLS_KEY` |
 | `keyboard.layout` | `us` | Comma-separated XKB layout such as `fr,us` | `SCREEN_RELAY_KEYBOARD_LAYOUT` |
