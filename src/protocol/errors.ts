@@ -19,6 +19,7 @@ export const ERROR_REASONS = {
   already_running: { class: 'conflict', code: 'BUSY', exitCode: 1 },
   port_in_use: { class: 'conflict', code: 'BUSY', exitCode: 1 },
   busy: { class: 'conflict', code: 'BUSY', exitCode: 1 },
+  control_taken: { class: 'conflict', code: 'BUSY', exitCode: 1 },
   unreachable: { class: 'network', code: 'NETWORK_ERROR', exitCode: 1 },
   timeout: { class: 'network', code: 'TIMEOUT', exitCode: 1 },
   disconnected: { class: 'network', code: 'DISCONNECTED', exitCode: 1 },
@@ -26,6 +27,7 @@ export const ERROR_REASONS = {
   forbidden: { class: 'permission', code: 'UNAUTHORIZED', exitCode: 1 },
   unsupported_input: { class: 'platform', code: 'UNSUPPORTED', exitCode: 1 },
   unsupported_platform: { class: 'platform', code: 'UNSUPPORTED', exitCode: 1 },
+  clipboard_unavailable: { class: 'platform', code: 'UNSUPPORTED', exitCode: 1 },
   missing_dependency: { class: 'platform', code: 'UNSUPPORTED', exitCode: 1 },
   component_failed: { class: 'platform', code: 'HTTP_ERROR', exitCode: 1 },
   spawn_failed: { class: 'platform', code: 'IO_ERROR', exitCode: 1 },
@@ -130,19 +132,30 @@ export function responseError(status: number, detail: unknown): RelayError {
   const body = detail && typeof detail === 'object' ? detail as Record<string, unknown> : {};
   const reason: ErrorReason = status === 401 ? 'unauthorized' : status === 403 ? 'forbidden'
     : status === 404 ? 'not_found' : status === 409 || status === 429 || (status === 503 && body.error === 'busy') || body.error === 'busy' ? 'busy'
+    : body.error === 'clipboard_busy' ? 'busy'
+    : body.error === 'clipboard_too_large' ? 'component_failed'
+    : body.error === 'clipboard_unavailable' ? 'clipboard_unavailable'
     : status === 422 || body.error === 'unsupported_input' ? 'unsupported_input'
     : status === 400 || status === 413 || body.error === 'invalid_input' ? 'invalid_input' : 'component_failed';
   const messages: Partial<Record<ErrorReason, string>> = {
     unauthorized: 'The engine rejected the token.', forbidden: 'The engine rejected the connection origin.',
     not_found: 'The engine endpoint was not found.', busy: 'Another controller holds control of the desktop.',
     unsupported_input: 'The engine does not support this input.', invalid_input: 'The engine rejected the input.',
+    clipboard_unavailable: 'The engine could not reach the desktop clipboard.',
   };
   const index = Number.isInteger(body.index) && Number(body.index) >= 0 ? Number(body.index) : undefined;
   const applied = Number.isInteger(body.applied) && Number(body.applied) >= 0 ? Number(body.applied) : undefined;
-  const message = body.error === 'screenshot_unavailable'
-    ? 'The engine could not take a screenshot. Read the engine log with screen-relay logs engine.'
-    : messages[reason] ?? 'The engine could not complete the request.';
+  const details: Record<string, string> = {
+    screenshot_unavailable: 'The engine could not take a screenshot. Read the engine log with screen-relay logs engine.',
+    invalid_text: 'The clipboard text must be UTF-8 without NUL characters.',
+    too_large: 'The text is larger than the engine accepts.',
+    clipboard_busy: 'The desktop clipboard request queue is full.',
+    clipboard_too_large: 'The desktop clipboard exceeds the 256 KiB read limit.',
+  };
+  const message = (typeof body.error === 'string' && Object.hasOwn(details, body.error) ? details[body.error] : undefined)
+    ?? messages[reason] ?? 'The engine could not complete the request.';
   return new RelayError(reason, message, {
+    ...(body.error === 'clipboard_busy' ? { hint: 'Wait briefly, then retry.' } : {}),
     data: { httpStatus: status, ...(index === undefined ? {} : { index }), ...(applied === undefined ? {} : { applied }) },
   });
 }

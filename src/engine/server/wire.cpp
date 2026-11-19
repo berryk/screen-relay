@@ -31,10 +31,75 @@ unsigned inputLength(const std::string& text, uint64_t& length) {
   if (!unsignedNumber(text, length) || !length || length % 16) return HTTP_STATUS_BAD_REQUEST;
   return length > max_input_batch * 16 ? HTTP_STATUS_REQ_ENTITY_TOO_LARGE : 0;
 }
-bool viewerTarget(const std::string& target, bool& control, bool& viewOnly) {
-  control = target == "/control";
-  viewOnly = target == "/stream?view=1";
-  return control || viewOnly || target == "/stream";
+unsigned clipboardLength(const std::string& text, uint64_t& length) {
+  if (text.empty()) return HTTP_STATUS_LENGTH_REQUIRED;
+  if (!unsignedNumber(text, length)) return HTTP_STATUS_BAD_REQUEST;
+  return length > max_clipboard_bytes ? HTTP_STATUS_REQ_ENTITY_TOO_LARGE : 0;
+}
+namespace {
+/// Length of the UTF-8 sequence at i, or 0 when it is invalid, overlong, a surrogate, or past U+10FFFF.
+size_t utf8Length(const std::string& text, size_t i) {
+  const auto byte = [&](size_t at) { return at < text.size() ? uint8_t(text[at]) : uint8_t(0); };
+  const uint8_t lead = byte(i);
+  if (lead < 0x80) return 1;
+  const size_t count = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+  if (!count || i + count > text.size()) return 0;
+  for (size_t k = 1; k < count; ++k) if ((byte(i + k) & 0xc0) != 0x80) return 0;
+  const uint8_t next = byte(i + 1);
+  if ((lead == 0xe0 && next < 0xa0) || (lead == 0xed && next > 0x9f) || (lead == 0xf0 && next < 0x90) || (lead == 0xf4 && next > 0x8f)) return 0;
+  return count;
+}
+}  // namespace
+bool validText(const std::string& text) {
+  for (size_t i = 0; i < text.size();) {
+    const size_t count = utf8Length(text, i);
+    if (!count || !text[i]) return false;
+    i += count;
+  }
+  return true;
+}
+std::string jsonString(const std::string& text) {
+  static const char digits[] = "0123456789abcdef";
+  std::string out = "\"";
+  for (size_t i = 0; i < text.size();) {
+    const size_t count = utf8Length(text, i);
+    const uint8_t c = uint8_t(text[i]);
+    if (!count) { out += "\\ufffd"; ++i; continue; }
+    if (c == '"' || c == '\\') { out += '\\'; out += char(c); }
+    else if (c == '\n') out += "\\n";
+    else if (c == '\t') out += "\\t";
+    else if (c == '\r') out += "\\r";
+    else if (c < 0x20) { out += "\\u00"; out += digits[c >> 4]; out += digits[c & 15]; }
+    else out.append(text, i, count);
+    i += count;
+  }
+  return out + '"';
+}
+Target viewerTarget(const std::string& target) {
+  if (target == "/stream?view=1") return {Socket::watch, false};
+  if (target == "/stream") return {Socket::stream, false};
+  if (target == "/stream?clipboard=1") return {Socket::stream, true};
+  if (target == "/stream?take=1") return {Socket::take, false};
+  if (target == "/stream?take=1&clipboard=1") return {Socket::take, true};
+  if (target == "/control") return {Socket::control, false};
+  return {};
+}
+ConnectionPlan connectionPlan(Socket socket, size_t viewerCount, bool streamOwnsInput, bool controlOpen,
+                              size_t grantViewerCount, bool grant, bool inputViewerHasGrant) {
+  const bool idle = !streamOwnsInput && !controlOpen;
+  const bool replacing = socket == Socket::take && streamOwnsInput;
+  const bool capacity = viewerCount < max_viewers || (viewerCount == max_viewers && replacing);
+  const bool grantCapacity = !grant || grantViewerCount < max_viewers - 1 ||
+                             (grantViewerCount == max_viewers - 1 && replacing && inputViewerHasGrant);
+  switch (socket) {
+    case Socket::none: return {};
+    case Socket::control: return {idle, false, false};
+    case Socket::watch: return {capacity && grantCapacity, false, false};
+    case Socket::stream: return {capacity && grantCapacity && idle, false, false};
+    case Socket::take:
+      return capacity && grantCapacity ? ConnectionPlan{true, streamOwnsInput, controlOpen} : ConnectionPlan{};
+  }
+  return {};
 }
 bool frameMessage(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint32_t lastSequence, const EncodedFrame& f,
                   uint16_t width, uint16_t height) {
@@ -62,6 +127,7 @@ void controlReady(std::vector<uint8_t>& out, size_t pre, uint32_t generation, ui
   auto* p = start(out, pre, 24, 4, generation);
   put(p+16, 4, 4); put(p+20, width, 2); put(p+22, height, 2);
 }
+void clipboardNotice(std::vector<uint8_t>& out, size_t pre, uint32_t generation) { start(out, pre, 20, 7, generation); }
 void inputReply(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint32_t sequence, InputStatus status) {
   auto* p = start(out, pre, 21, 5, generation);
   put(p+12, sequence, 4); put(p+16, 1, 4);

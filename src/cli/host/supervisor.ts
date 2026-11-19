@@ -30,6 +30,7 @@ export type SessionArgs = HostArgs & {
   display?: string;
   desktop?: string;
   public?: string;
+  'allow-origin'?: string;
   bind?: string;
   resolution: string;
   fps: number;
@@ -341,7 +342,7 @@ export class Session {
     const viewer = join(LAUNCHER_DIR, '..', 'viewer');
     if (!existsSync(join(dirname(engine), 'viewer')) && existsSync(join(viewer, 'viewer.js'))) engineCommand.push('--viewer-dir', viewer);
     if (this.args.output) engineCommand.push('--output', this.args.output);
-    if (bind !== '127.0.0.1' || this.args.public || attaches(backend)) {
+    if (bind !== '127.0.0.1' || this.args.public || this.args['allow-origin'] || attaches(backend)) {
       token = randomBytes(32).toString('hex');
       const tokenFile = join(this.dir, 'token');
       const descriptor = openSync(tokenFile, 'w', 0o600);
@@ -352,6 +353,7 @@ export class Session {
       this.data.tokenFile = tokenFile;
     }
     if (this.args.public) engineCommand.push('--public-origin', this.args.public);
+    if (this.args['allow-origin']) engineCommand.push('--allow-origin', this.args['allow-origin']);
     if (this.args['tls-cert']) {
       const absolute = (file: string) => (process.platform === 'win32' && file ? resolve(file) : file);
       engineCommand.push('--tls-cert', absolute(this.args['tls-cert']), '--tls-key', absolute(this.args['tls-key'] ?? ''));

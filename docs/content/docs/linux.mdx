@@ -115,3 +115,4 @@ Wayland works with these compositors:
 - Selecting an output by name requires `wl_output` version 4.
 - The output's size is fixed for the session. Restart screen-relay after changing it.
 - The cursor image is not streamed. The viewer shows its own arrow.
+- The clipboard needs the `wlr-data-control` protocol, which sway and labwc provide. Without it, the session works and `capabilities.clipboard` is `false`.

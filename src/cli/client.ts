@@ -5,7 +5,7 @@ import { MAX_INPUT_BATCH, isLoopback, validToken } from '../protocol/index.js';
 import { DEFAULT_PORT } from './host/common.js';
 import { connectHost } from './host/supervisor.js';
 import { alive, readSession } from './host/state.js';
-import { count, emit, Failure, nextFor, nextStep, quote, receipt, row, sessionCommand, size } from './output.js';
+import { count, emit, Failure, nextFor, nextStep, quote, receipt, row, sessionCommand, size, writeText } from './output.js';
 
 type Args = Record<string, any> & { command: string; json: boolean; name: string };
 
@@ -79,9 +79,10 @@ export function resolveTarget(args: Args): Target {
 const RECOVERY: Partial<Record<string, string>> = {
   busy: 'Close the other viewer or client, then retry.',
   unauthorized: 'Pass the token with --token-file FILE or set SCREEN_RELAY_TOKEN_FILE.',
-  forbidden: 'Use the --public origin, or connect through loopback.',
+  forbidden: 'Use the --public origin, or a loopback page whose origin matches the address it connects to. A browser page on another origin needs --allow-origin on `screen-relay up`.',
   unsupported_input: 'Use screen-relay type for layout-neutral text.',
   disconnected: 'Retry the command.',
+  clipboard_unavailable: 'Run screen-relay status --json and check capabilities.clipboard.',
 };
 
 /** Turns an SDK error into the CLI failure shape the documented commands and exit codes use. */
@@ -116,9 +117,13 @@ async function withClient<Result>(args: Args, action: (client: Client) => Promis
   catch (error) { throw clientFailure(error, target); }
 }
 
-function textArgument(args: Args, value: unknown): string {
+/** The text argument, or all of stdin read as a stream, since a synchronous read of a pipe can fail before the writer finishes. */
+async function textArgument(args: Args, value: unknown): Promise<string> {
   if (Boolean(args.stdin) === (value !== undefined)) throw new Failure('invalid_input', 'Give the argument or --stdin, not both or neither');
-  return args.stdin ? readFileSync(0, 'utf8') : String(value);
+  if (!args.stdin) return String(value);
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function number(value: string): string {
@@ -179,7 +184,7 @@ export async function cmdKey(args: Args): Promise<number> {
 }
 
 export async function cmdType(args: Args): Promise<number> {
-  const text = textArgument(args, args.text);
+  const text = await textArgument(args, args.text);
   const target = resolveTarget(args);
   const events = await withClient(args, (client) => client.type(text), target);
   return finish(args, events.events, `Typed ${count(Array.from(text).length, 'character')}`, target);
@@ -187,7 +192,7 @@ export async function cmdType(args: Args): Promise<number> {
 
 export async function cmdInput(args: Args): Promise<number> {
   let events: unknown;
-  try { events = JSON.parse(textArgument(args, args.events)); }
+  try { events = JSON.parse(await textArgument(args, args.events)); }
   catch (error) {
     if (error instanceof Failure) throw error;
     throw new Failure('invalid_input', `Invalid JSON: ${detail(error)}`, 'Pass a JSON array of SDK input events.');
@@ -199,6 +204,22 @@ export async function cmdInput(args: Args): Promise<number> {
   const target = resolveTarget(args);
   const result = await withClient(args, (client) => client.input(events as never), target);
   return finish(args, result.events, 'Sent input', target);
+}
+
+export async function cmdClipboard(args: Args): Promise<number> {
+  const target = resolveTarget(args);
+  if (args.action === 'get') {
+    const text = await withClient(args, (client) => client.clipboard(), target);
+    if (args.json) emit(args, { clipboard: { text, bytes: Buffer.byteLength(text) } }, '');
+    else writeText(text);
+    return 0;
+  }
+  const text = await textArgument(args, args.text);
+  await withClient(args, (client) => client.setClipboard(text), target);
+  const bytes = Buffer.byteLength(text);
+  emit(args, { clipboard: { bytes }, outcome: 'set' },
+    [receipt(bytes ? 'Set' : 'Cleared', 'clipboard', args), row('Target', target.url), row('Size', size(bytes))].join('\n'), {});
+  return 0;
 }
 
 export async function cmdRemoteStatus(args: Args): Promise<number> {

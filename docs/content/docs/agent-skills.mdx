@@ -59,7 +59,7 @@ screen-relay screenshot /tmp/after.png
 - A screenshot writes a PNG, default `screen.png`, or PNG bytes to stdout with `-`. Success means the engine saved the frame, not that an app responded.
 - Click a window to focus it before typing. Use `type` for text, and `key` for shortcuts and Escape.
 - Input success means the engine applied the events, not that the application reacted. Take a screenshot to confirm.
-- Only one controller sends input at a time. A browser viewer is view-only until someone chooses **Take control** in it, so the CLI can work while a person watches. A viewer that owns input, or a control session, makes input return `busy` with `Another controller holds control of the desktop.` Screenshots still work. Wait for it to release control or close, then retry once.
+- Only one controller sends input at a time. A browser viewer claims idle input when it opens. If you hold an SDK control session, the viewer opens view-only until a person chooses **Take control**. A viewer that owns input, or a control session, makes input return `busy` with `Another controller holds control of the desktop.` Screenshots still work. Wait for it to release control or close, then retry once. A person can choose **Take control** at any time, which ends an SDK control session with `control_taken`.
 - `screen-relay run -- APP` returns the app's pid at once, before its window appears. Poll screenshots until the window shows, and read the app's output with `screen-relay logs apps`.
 
 A long `screen-relay type` is split into batches. When one fails:

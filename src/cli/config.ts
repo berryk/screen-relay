@@ -11,7 +11,7 @@ export const COMPOSITORS = ['auto', 'on', 'off'] as const;
 export type ConfigSettings = {
   display: { resolution: string; compositor: (typeof COMPOSITORS)[number] };
   stream: { fps: number; bitrate: { min: number; start: number; max: number } };
-  server: { port: number; bind: string; public: string | null; tls_cert: string | null; tls_key: string | null };
+  server: { port: number; bind: string; public: string | null; allow_origin: string | null; tls_cert: string | null; tls_key: string | null };
   keyboard: { layout: string };
   desktop: string;
   backend?: string;
@@ -23,7 +23,7 @@ type ConfigSection = 'display' | 'stream' | 'server' | 'keyboard';
 const SECTIONS: Record<ConfigSection, readonly string[]> = {
   display: ['resolution', 'compositor'],
   stream: ['fps', 'bitrate'],
-  server: ['port', 'bind', 'public', 'tls_cert', 'tls_key'],
+  server: ['port', 'bind', 'public', 'allow_origin', 'tls_cert', 'tls_key'],
   keyboard: ['layout'],
 };
 const ROOT_KEYS = ['display', 'stream', 'server', 'keyboard', 'desktop', 'backend'];
@@ -122,6 +122,24 @@ function textValue(value: unknown, path: string): string {
   return value;
 }
 
+const HTTPS_ORIGIN = /^https:\/\/([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::([1-9][0-9]{0,4}))?$/;
+const LOOPBACK_HTTP_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/;
+
+function portAllowed(port: string | undefined, excluded: number): boolean {
+  return port === undefined || (Number(port) <= 65535 && Number(port) !== excluded);
+}
+
+/** Reports whether a value is 1 to 16 comma-separated exact HTTPS or loopback HTTP origins, written the way a browser sends them. */
+export function allowedOrigins(value: unknown): boolean {
+  const origins = String(value).split(',');
+  return origins.length <= 16 && origins.every((origin) => {
+    const secure = HTTPS_ORIGIN.exec(origin);
+    if (secure) return portAllowed(secure[2], 443);
+    const local = LOOPBACK_HTTP_ORIGIN.exec(origin);
+    return local !== null && portAllowed(local[2], 80);
+  });
+}
+
 export function backendValue(value: unknown, path: string): (typeof BACKENDS)[number] {
   const text = textValue(value, path);
   const backend = BACKENDS.find((candidate) => candidate === text);
@@ -209,6 +227,11 @@ const validators = {
     if (!/^https:\/\/[^/?#@\\\s]+$/.test(origin)) wrong(path, value, 'an HTTPS origin without a path, query or credentials');
     return origin;
   },
+  'server.allow_origin': (value: unknown, path: string) => {
+    const origins = textValue(value, path);
+    if (!allowedOrigins(origins)) wrong(path, value, '1 to 16 comma-separated exact HTTPS origins, or loopback HTTP origins such as http://localhost:8081, without a path, wildcard or default port');
+    return origins;
+  },
   'server.tls_cert': textValue,
   'server.tls_key': textValue,
   'keyboard.layout': (value: unknown, path: string) => {
@@ -228,6 +251,7 @@ const assign: Record<string, (settings: ConfigSettings, value: unknown, path: st
   'server.port': (settings, value, path) => { settings.server.port = validators['server.port'](value, path); },
   'server.bind': (settings, value, path) => { settings.server.bind = validators['server.bind'](value, path); },
   'server.public': (settings, value, path) => { settings.server.public = validators['server.public'](value, path); },
+  'server.allow_origin': (settings, value, path) => { settings.server.allow_origin = validators['server.allow_origin'](value, path); },
   'server.tls_cert': (settings, value, path) => { settings.server.tls_cert = validators['server.tls_cert'](value, path); },
   'server.tls_key': (settings, value, path) => { settings.server.tls_key = validators['server.tls_key'](value, path); },
   'keyboard.layout': (settings, value, path) => { settings.keyboard.layout = validators['keyboard.layout'](value, path); },
@@ -239,7 +263,7 @@ export function loadConfig(path?: string): [ConfigSettings, string | null, Set<s
   const settings: ConfigSettings = {
     display: { resolution: '1280x720', compositor: 'auto' },
     stream: { fps: 60, bitrate: { min: 1000000, start: 8000000, max: 40000000 } },
-    server: { port: 8080, bind: '127.0.0.1', public: null, tls_cert: null, tls_key: null },
+    server: { port: 8080, bind: '127.0.0.1', public: null, allow_origin: null, tls_cert: null, tls_key: null },
     keyboard: { layout: 'us' },
     desktop: 'xfce',
   };
@@ -289,6 +313,7 @@ export function applyTo(args: Record<string, unknown>, settings: ConfigSettings,
     ['port', 'SCREEN_RELAY_PORT', 'server.port', settings.server.port],
     ['bind', 'SCREEN_RELAY_BIND', 'server.bind', present.has('server.bind') ? settings.server.bind : undefined],
     ['public', 'SCREEN_RELAY_PUBLIC', 'server.public', settings.server.public],
+    ['allow-origin', 'SCREEN_RELAY_ALLOW_ORIGIN', 'server.allow_origin', settings.server.allow_origin],
     ['tls-cert', 'SCREEN_RELAY_TLS_CERT', 'server.tls_cert', settings.server.tls_cert],
     ['tls-key', 'SCREEN_RELAY_TLS_KEY', 'server.tls_key', settings.server.tls_key],
     ['desktop', 'SCREEN_RELAY_DESKTOP', 'desktop', present.has('desktop') ? settings.desktop : undefined],

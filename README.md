@@ -47,7 +47,7 @@ The full walkthrough is in [Getting started](https://screen-relay.dev/docs/getti
 
 `screen-relay up` starts a session: a virtual display, a desktop, and the engine. On Linux the display is X11 with XFCE or headless Wayland with sway. On a Mac the engine attaches to the display you are logged in to. On Windows it attaches to the desktop of the signed-in user. The engine captures the screen, encodes it as H.264, and serves the viewer, the stream, and the input API on one port. It lowers the bitrate on a slow link. See [How streaming works](https://screen-relay.dev/docs/how-streaming-works).
 
-A session listens on loopback with no token by default. Starting it with `--public` or on another address creates a token that every remote request must send. Only one controller sends input at a time: a viewer that took control, an SDK control session, or the CLI. A viewer opens view-only, so it can watch while the CLI or SDK sends input. Screenshots still work while another controller holds input.
+A session listens on loopback with no token by default. Starting it with `--public` or on another address creates a token that every remote request must send. There is one input owner at a time. A viewer that opens when input is idle gets control. If another viewer or an SDK session owns input, the new viewer opens view-only. Choose **Take control** to transfer input to your viewer, or **Release control** to keep watching without owning input. Screenshots still work while another controller holds input.
 
 ## For AI agents
 

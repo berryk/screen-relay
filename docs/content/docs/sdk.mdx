@@ -13,7 +13,7 @@ npm install screen-relay
 
 ### One-shot calls
 
-A viewer opens view-only, so these calls work while it watches. A viewer that took control makes `click` return `busy`; choose **Release control** in the viewer first.
+A viewer opens with control when input is idle. If it has control, `click` returns `busy`; choose **Release control** in the viewer first.
 
 ```js
 import { createClient } from 'screen-relay';
@@ -43,7 +43,7 @@ try {
 }
 ```
 
-- A control session needs the viewer closed, because the engine serves one `/stream` or `/control` connection at a time.
+- A control session can run while a viewer watches. Connecting while a viewer owns input fails with `busy`, and a running session ends with `control_taken` when a viewer chooses **Take control**.
 - The session exposes `surface: { width, height }`.
 - It allows 32 pending input requests.
 - An acknowledgement timeout closes the session.
@@ -52,10 +52,10 @@ try {
 
 ## One input owner at a time
 
-- A viewer that took control, a control session, or the CLI can own input. The viewer opens view-only, so client calls work while it watches.
+- An SDK control session owns input until it closes or a viewer takes control. A viewer that opens during an SDK control session can watch without interrupting it.
 - Choose **Release control** in a viewer that owns input, or close it, before sending input from the CLI or SDK. Otherwise the call returns `busy`.
-- A control session cannot connect while a viewer is open.
-- Status, capabilities, and screenshots do not need input control.
+- A viewer that chooses **Take control** ends a control session with `control_taken`.
+- Status, capabilities, screenshots, and the clipboard do not need input control.
 
 ## Methods
 
@@ -72,6 +72,8 @@ Coordinates are fractions from `0` to `1`, measured from the top-left. See [Inpu
 | `capabilities()` | Backend, screen size, `fps`, `max_input_batch`, and features. |
 | `status()` | Transport metrics; unavailable resource counters are `null`. |
 | `screenshot()` | PNG bytes, without the viewer's cursor overlay. |
+| `clipboard()` | The clipboard text, or an empty string when the clipboard holds no text. |
+| `setClipboard(text)` | Replace the clipboard text; an empty string clears it. Text is UTF-8, up to 256 KiB, without NUL characters. Returns no value. |
 
 `capabilities(options)`, `status(options)`, and `screenshot(options, path?)` are also standalone exports. `screenshot` returns PNG bytes and writes them to `path` when one is given.
 
@@ -133,7 +135,8 @@ Pass these options to `createClient`, the standalone functions, or `connect`. Co
 | `busy` | Another input owner, a full input queue, 32 pending session requests, or another screenshot. Wait for it to finish before retrying. |
 | `unauthorized`, `forbidden` | The engine rejected the token, host, or origin. Check the connection settings. |
 | `unreachable`, `timeout` | Check the URL, network, and TLS certificate. Increase `timeout` if needed. |
-| `disconnected` | The control session closed or an HTTP response ended before it completed. Reconnect the session. For input calls, check a screenshot before retrying. |
+| `disconnected` | The control session closed or an HTTP response ended early. If the control session closed, connect again. For input calls, check a screenshot before retrying. |
+| `control_taken` | A viewer chose **Take control**, which ended the control session. Pending input and later calls to `session.input()` and `session.screenshot()` reject with this reason. `session.capabilities()` and `session.status()` still make independent HTTP requests. Connect again after the viewer releases control. |
 | `invalid_input`, `invalid_option` | Check the URL, token, input, and options. |
 | `unsupported_input` | The backend cannot apply the event or type the character. Change the input or keyboard layout. |
 | `component_failed` | The engine could not complete the request. For screenshots, check `screen-relay logs engine` and [Wayland requirements](/docs/linux#compositors). |

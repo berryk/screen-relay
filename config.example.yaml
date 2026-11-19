@@ -22,6 +22,7 @@ server:
   port: 8080
   # bind: 127.0.0.1
   # public: https://desktop.example.com
+  # allow_origin: https://app.example.com,http://localhost:8081
   # tls_cert: /path/fullchain.pem
   # tls_key: /path/key.pem
 

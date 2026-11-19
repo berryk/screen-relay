@@ -3,7 +3,7 @@ title: Remote access
 description: Open the viewer or control a session from another machine with an SSH tunnel, a public HTTPS URL, or native TLS.
 ---
 
-Open a session's viewer and run its client commands from another machine. A session listens on `127.0.0.1:8080` with no token, so only the VM can reach it by default. Anyone with a session's token can see and control its desktop. A session has one token and no user identity.
+Open a session's viewer and run its client commands from another machine. A session listens on `127.0.0.1:8080` with no token, so only the VM can reach it by default. Anyone with a session's token can see and control its desktop. A session has one token and no user identity. To share less than that, create a [grant](#grants).
 
 ## Choose a path
 
@@ -33,7 +33,7 @@ The session stays on loopback, so the tunnel needs no token.
    screen-relay up -d --public https://desktop.example.com
    ```
 
-   `--public` takes a bare HTTPS origin. It makes the session listen on `0.0.0.0` unless you pass `--bind`, creates a token, and accepts requests only for that host. Pages and apps on any origin can connect when they send the token.
+   `--public` takes a bare HTTPS origin. It makes the session listen on `0.0.0.0` unless you pass `--bind` and creates a token. Use the configured HTTPS URL for remote access. The built-in viewer still works on the same loopback address, including through an SSH tunnel. See [Browser origins](#browser-origins) for embedded viewers.
 
 2. Configure the proxy to:
    - forward every path with no prefix, including `/viewer.js`, `/stream`, and `/control` ([endpoints](/docs/protocol#endpoints))
@@ -59,15 +59,107 @@ Without `--tls-cert`, the engine serves plain HTTP and the proxy ends TLS. The p
 
 The engine serves HTTPS itself, prints no `TLS proxy` row, and speaks HTTP/1.1 only. Client commands on the VM accept the session's own certificate even when its host name does not match, so a self-signed certificate works there.
 
+## Browser origins
+
+A browser sends an `Origin` header on WebSocket connections and on cross-origin requests, naming the page that made them. The engine checks that header in addition to the token, so a page on another site cannot use a token it obtained.
+
+| Session | Origins the engine accepts |
+| --- | --- |
+| Started with `--public` | The `--public` origin, each origin in `--allow-origin`, and a loopback page whose origin uses the same `HOST:PORT` it connects to, such as `http://127.0.0.1:8080`. |
+| Started without `--public` | Loopback origins (`http` or `https`, `localhost` or `127.0.0.1`, any port), and each origin in `--allow-origin`. |
+
+A request from any other origin gets 403 `forbidden`, and a WebSocket fails its handshake. The CLI, the Node SDK, and other clients that send no `Origin` header are not affected.
+
+To let a page on another origin connect, such as an app that embeds the viewer, list its origin when you start the session:
+
+```sh
+screen-relay up -d --public https://desktop.example.com --allow-origin https://app.example.com
+```
+
+A page that a local app serves, such as an embedding host on this machine, can connect from a loopback HTTP origin:
+
+```sh
+screen-relay up -d --public https://desktop.example.com --allow-origin http://localhost:8081
+```
+
+- Separate several origins with commas and no spaces, up to 16. You can set `SCREEN_RELAY_ALLOW_ORIGIN` or `server.allow_origin` instead of the flag.
+- Write each origin the way the browser sends it: lowercase `https://HOST[:PORT]` for any host, or `http://localhost[:PORT]` or `http://127.0.0.1[:PORT]` for a page served on the machine itself. Use no path and no trailing slash. Leave out port 443 for HTTPS and port 80 for HTTP.
+- The engine compares the whole string. It has no wildcard, so `https://app.example.com` does not cover `https://www.app.example.com`.
+- `--allow-origin` creates a token even when the session listens on `127.0.0.1`, and the allowed page must send it.
+- The engine never accepts `Origin: null`, which a browser sends from a sandboxed frame or a `file://` page.
+
+### Embedded viewers and CORS
+
+A page on an allowed origin can open the WebSocket stream. The engine checks the `Origin` header during the WebSocket handshake, and browsers do not apply CORS to WebSocket connections, so the stream works from another origin once you allow it.
+
+Browser HTTP requests do follow CORS. The engine sends no `Access-Control-Allow-Origin` header, so a page on another origin cannot read `/capabilities`, `/metrics`, `/screenshot.png`, or the clipboard endpoint, even when `--allow-origin` lists it. Serve the viewer from the relay origin when it needs those endpoints. An embedded viewer that only uses the WebSocket works from an allowed origin.
+
+### Update an app that connects from another origin
+
+Earlier versions accepted any origin when the session had a token. A session with `--public` now refuses a page on another origin until you allow that origin. The built-in viewer still works on loopback when its origin uses the same `HOST:PORT` it connects to, such as `http://127.0.0.1:8080` through an SSH tunnel. Use `--allow-origin` for an embedded viewer on another origin. This enables its WebSocket connection, not cross-origin browser access to the HTTP API.
+
+For an embedded viewer, including an MCP App inside an AI client, allow the origin of the page that opens `/stream`:
+
+1. Find the origin the app's page runs on. In the browser's or client's developer tools, open the failed `/stream` request and read its `Origin` request header.
+2. Restart the session with that value in `--allow-origin`. A loopback value such as `http://localhost:8081` is accepted. Restarting creates a new token, so give the app the new one.
+3. Reload the app.
+
+If the header is `null`, the client renders the app in a frame without an origin of its own, and the app cannot connect from the browser. Route its requests through a server you control, which sends no `Origin` header and holds the token.
+
 ## Tokens
 
-screen-relay creates a 64-character lowercase hex token (256 random bits) whenever the session listens anywhere other than `127.0.0.1`, or uses `--public`.
+screen-relay creates a 64-character lowercase hex token (256 random bits) whenever the session listens anywhere other than `127.0.0.1`, or uses `--public` or `--allow-origin`.
 
 - The token is stored in a `token` file in the session's state directory, readable only by its owner. `screen-relay status --json` shows the path as `tokenFile`.
 - `screen-relay status` hides the token unless you pass `--show-token`.
 - The viewer reads `#token=` from the link that `up` prints, removes it from the address bar, and uses it only on `https://` or loopback pages. Browsers never send the fragment to the server.
 - Each `screen-relay up` creates a new token and ends open connections. To rotate a token, run `screen-relay down`, then `screen-relay up`.
-- To give a custom client access that works only once, request a ticket with `POST /tickets` and the token. The client opens its WebSocket with the `ticket.TICKET` subprotocol instead of the token, and the ticket stops working after that connection or after 60 seconds. The bundled viewer doesn't accept tickets yet; it still needs the `#token=` link. See the [protocol](https://github.com/vercel-labs/screen-relay/blob/main/PROTOCOL.md).
+
+## Grants
+
+Grants replace the one-time `/tickets` endpoint introduced in v0.1.2. Custom viewers now send `bearer.GRANT_TOKEN` instead of `ticket.TICKET`.
+
+A grant gives someone part of a session for a limited time without giving them the token. You create it with the token, and you can revoke it before it expires.
+
+| Scope | What the holder can do |
+| --- | --- |
+| `watch` | Watch the desktop. |
+| `control` | Watch the desktop and send input, in the viewer or over `/control`. |
+
+Neither scope can read or set the clipboard, take a screenshot over HTTP, send `POST /input`, or create and revoke grants.
+
+1. Create the grant from a machine that has the token. This example creates a watch grant that lasts 10 minutes. Without `ttl`, a grant lasts 3600 seconds, which is also the maximum.
+
+   ```sh
+   curl -s -X POST -H "Authorization: Bearer $(cat ./token)" "https://desktop.example.com/grants/watch?ttl=600"
+   ```
+
+   The response has this shape:
+
+   ```json
+   {"id":"ID","token":"GRANT_TOKEN","expires_in":600,"scope":"watch"}
+   ```
+
+   Use `/grants/control` for a control grant.
+
+2. Build the viewer link from the grant's `token` and share it:
+
+   | Scope | Link |
+   | --- | --- |
+   | `watch` | `https://desktop.example.com/#token=GRANT_TOKEN&scope=watch` |
+   | `control` | `https://desktop.example.com/#token=GRANT_TOKEN&scope=control` |
+
+   The viewer removes the fragment from the address bar, as it does for the session token. A watch link shows the desktop with no **Take control** button. A control link can take and release control, but it has no clipboard sync, and its stats panel shows no engine metrics.
+
+3. To end the grant early, revoke it with its `id`:
+
+   ```sh
+   curl -s -X DELETE -H "Authorization: Bearer $(cat ./token)" "https://desktop.example.com/grants/ID"
+   ```
+
+When a grant is revoked or expires, the engine closes the connections opened with it and refuses new ones. Other viewers and clients stay connected. Grants are kept in memory, so `screen-relay down` ends them all.
+
+A custom client sends the grant's `token` the same way as the session token. The [protocol](https://github.com/vercel-labs/screen-relay/blob/main/PROTOCOL.md#grants) lists the WebSocket URLs each scope opens.
 
 ## Control a session from your laptop
 

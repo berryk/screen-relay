@@ -51,6 +51,7 @@ server:
   port: 9090
   bind: 0.0.0.0
   public: https://desk.example.com
+  allow_origin: https://app.example.com,http://localhost:8081
   tls_cert: /tmp/fullchain.pem
   tls_key: /tmp/key.pem
 keyboard:
@@ -65,11 +66,38 @@ desktop: none
   assert.equal(settings.server.port, 9090);
   assert.equal(settings.server.bind, '0.0.0.0');
   assert.equal(settings.server.public, 'https://desk.example.com');
+  assert.equal(settings.server.allow_origin, 'https://app.example.com,http://localhost:8081');
   assert.equal(settings.server.tls_cert, '/tmp/fullchain.pem');
   assert.equal(settings.server.tls_key, '/tmp/key.pem');
   assert.equal(settings.keyboard.layout, 'fr,us');
   assert.equal(settings.desktop, 'none');
   assert.ok(present.has('display.resolution'));
+});
+
+test('validates server.allow_origin as exact HTTPS or loopback HTTP origins', () => {
+  const [settings, , present] = config.loadConfig(write('server:\n  allow_origin: https://app.example.com,http://localhost:8081\n'));
+  assert.equal(settings.server.allow_origin, 'https://app.example.com,http://localhost:8081');
+  assert.ok(present.has('server.allow_origin'));
+  for (const value of ['http://app.example.com', 'http://localhost:80', 'http://LOCALHOST:8081', 'https://App.example.com', 'https://app.example.com/']) {
+    assert.throws(() => config.loadConfig(write(`server:\n  allow_origin: ${value}\n`)), /server\.allow_origin/, value);
+  }
+  assert.throws(() => config.loadConfig(write('server:\n  allow_origin: 8081\n')), /server\.allow_origin.*a string/);
+
+  const previous = process.env.SCREEN_RELAY_ALLOW_ORIGIN;
+  try {
+    process.env.SCREEN_RELAY_ALLOW_ORIGIN = 'http://localhost:8081';
+    const args = {};
+    config.applyTo(args, settings, new Set());
+    assert.equal(args['allow-origin'], 'http://localhost:8081');
+    process.env.SCREEN_RELAY_ALLOW_ORIGIN = 'http://app.example.com';
+    assert.throws(() => config.applyTo({}, settings, new Set()), /SCREEN_RELAY_ALLOW_ORIGIN/);
+    const explicit = { 'allow-origin': 'https://app.example.com' };
+    config.applyTo(explicit, settings, new Set());
+    assert.equal(explicit['allow-origin'], 'https://app.example.com');
+  } finally {
+    if (previous === undefined) delete process.env.SCREEN_RELAY_ALLOW_ORIGIN;
+    else process.env.SCREEN_RELAY_ALLOW_ORIGIN = previous;
+  }
 });
 
 test('validates the FPS range in YAML and keeps the default at 60', () => {

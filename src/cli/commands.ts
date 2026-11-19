@@ -1,5 +1,5 @@
-import { cmdClick, cmdInput, cmdKey, cmdMove, cmdScreenshot, cmdScroll, cmdType } from './client.js';
-import { BACKENDS } from './config.js';
+import { cmdClick, cmdClipboard, cmdInput, cmdKey, cmdMove, cmdScreenshot, cmdScroll, cmdType } from './client.js';
+import { BACKENDS, allowedOrigins } from './config.js';
 import { cmdDoctor } from './host/doctor.js';
 import { cmdDown, cmdLogs, cmdRun, cmdStatus, cmdUp, COMPONENTS } from './host/session_commands.js';
 import { cmdInstall } from './host/setup.js';
@@ -23,7 +23,7 @@ export type Parameter = {
   deferredDefault?: boolean;
   validate?: (value: unknown) => boolean;
 };
-export type Subcommand = { name: string; summary: string; examples: { description: string; command: string }[] };
+export type Subcommand = { name: string; summary: string; examples: { description: string; command: string }[]; resultSchema?: Record<string, unknown> };
 export type RunsOn = 'vm' | 'client' | 'anywhere';
 export type Command = {
   summary: string;
@@ -33,7 +33,7 @@ export type Command = {
   options: Parameter[];
   examples: { description: string; command: string }[];
   notes: string[];
-  resultSchema: Record<string, unknown>;
+  resultSchema?: Record<string, unknown>;
   separator?: string;
   usageTail?: string;
   subcommands?: Subcommand[];
@@ -75,6 +75,7 @@ export const commands: Record<string, Command> = {
       { name: 'backend', type: 'string', valueHint: '<BACKEND>', summary: 'On Linux, defaults to x11 when the engine has it, else wayland; a --display without a colon selects wayland. On macOS, defaults to macos; on Windows, defaults to windows', environment: 'SCREEN_RELAY_BACKEND', acceptedValues: BACKENDS },
       { name: 'output', type: 'string', valueHint: '<NAME>', summary: 'Capture a Wayland output by name, a macOS display by CGDirectDisplayID, or a Windows display by device name' },
       { name: 'public', type: 'string', valueHint: '<URL>', summary: 'Advertise this HTTPS origin', environment: 'SCREEN_RELAY_PUBLIC', validate: (value) => /^https:\/\/[^/?#@\\\s]+$/.test(String(value)) },
+      { name: 'allow-origin', type: 'string', valueHint: '<ORIGINS>', summary: 'Also accept browser requests from these comma-separated exact origins: HTTPS for any host, or HTTP for localhost and 127.0.0.1', environment: 'SCREEN_RELAY_ALLOW_ORIGIN', validate: allowedOrigins },
       { name: 'tls-cert', type: 'string', valueHint: '<FILE>', summary: 'Serve TLS with this certificate', environment: 'SCREEN_RELAY_TLS_CERT' },
       { name: 'tls-key', type: 'string', valueHint: '<FILE>', summary: 'Read the TLS private key', environment: 'SCREEN_RELAY_TLS_KEY' },
       { name: 'bind', type: 'string', valueHint: '<ADDRESS>', summary: 'Listen on this address', environment: 'SCREEN_RELAY_BIND', default: '127.0.0.1', deferredDefault: true },
@@ -131,6 +132,27 @@ export const commands: Record<string, Command> = {
   key: { summary: 'Press key combinations', group: 'Control', runsOn: 'client', arguments: [{ name: 'combos', type: 'string', valueHint: '<combo>', summary: 'Key combinations to press in order', required: true, repeat: 'collect' }], options: client, examples: example('Focus the address bar', 'screen-relay key ctrl+l'), notes: ['Keys are physical. cmd and meta are aliases of super.'], resultSchema: inputResult, run: cmdKey },
   type: { summary: 'Type text using the remote keyboard layout', group: 'Control', runsOn: 'client', arguments: [{ name: 'text', type: 'string', valueHint: '<text>', brackets: false, summary: 'Text to type' }], options: [...client, stdin], examples: example('Type a greeting', 'screen-relay type "Hello"'), notes: [], resultSchema: inputResult, validate: textSource('text'), run: cmdType },
   input: { summary: 'Send a JSON array of input events', group: 'Control', runsOn: 'client', arguments: [{ name: 'events', type: 'string', valueHint: '<json>', brackets: false, summary: 'SDK input events' }], options: [...client, stdin], examples: example('Send raw key events', 'screen-relay input \'[{"type":"keyDown","key":4},{"type":"keyUp","key":4}]\''), notes: ['Accepts 1 to 256 events.'], resultSchema: inputResult, validate: textSource('events'), run: cmdInput },
+  clipboard: {
+    summary: 'Read or set the remote clipboard text', group: 'Control', runsOn: 'client', usageTail: '<command> [text]',
+    arguments: [
+      { name: 'action', type: 'string', valueHint: '<command>', summary: 'Get or set', required: true, acceptedValues: ['get', 'set'] },
+      { name: 'text', type: 'string', valueHint: '<text>', brackets: false, summary: 'Text to put on the clipboard' },
+    ],
+    options: [...client, stdin],
+    subcommands: [
+      { name: 'get', summary: 'Print the clipboard text', examples: example('Read what the desktop copied', 'screen-relay clipboard get'), resultSchema: { clipboard: { text: 'string', bytes: 'number' } } },
+      { name: 'set', summary: 'Replace the clipboard text', examples: example('Put a URL on the clipboard', 'screen-relay clipboard set "https://example.com"'), resultSchema: { clipboard: { bytes: 'number' }, outcome: 'set' } },
+    ],
+    examples: [
+      { description: 'Read what the desktop copied', command: 'screen-relay clipboard get' },
+      { description: 'Put a URL on the clipboard', command: 'screen-relay clipboard set "https://example.com"' },
+      { description: 'Put piped text on the clipboard', command: 'screen-relay clipboard set --stdin' },
+    ],
+    notes: ['get prints the text exactly, with no newline added. Use --json for the text and byte count.', 'Text is UTF-8, up to 256 KiB. set "" clears the clipboard.', 'To paste the text, press the paste keys afterwards, such as screen-relay key ctrl+v.'],
+    validate: (args) => args.action === 'get' && (args.text !== undefined || args.stdin) ? 'screen-relay clipboard get takes no text'
+      : args.action === 'set' ? textSource('text')(args) : undefined,
+    run: cmdClipboard,
+  },
   skills: {
     summary: 'Read the agent skills shipped with this CLI', group: 'Machine', runsOn: 'anywhere', usageTail: '<command> [name]',
     arguments: [

@@ -38,12 +38,15 @@ agent or CLI/SDK input over /input (HTTP) or /control (WebSocket)
 
 Only one of the viewer, `/control`, and `/input` owns input at a time.
 
+`connectionPlan` in `src/engine/server/wire.cpp` is the connection state machine: it decides whether a new `/stream` or `/control` socket opens and which open socket it closes, and `server-test` checks every row of its table.
+
 ## Interfaces
 
 - `CaptureSource` (`src/engine/core/capture-source.hpp`): `fd()`, `dimensions()`, `drainDamage()`, `pixelFormat()`, `capture()`. A frame is a non-owning CPU view (BGRA or ARGB), valid until the next capture. Optional `cursorSupported()` and `cursor(force)`.
 - `InputBackend` (`src/engine/core/input.hpp`): platform primitives only: `nativeKey(usage)`, `pressKey`, `releaseKey`, `typeText(codepoint)`, `pressButton`, `releaseButton`, `move`, `scroll`, `resetLocks`, `fence(mark)`, `pending`, `cancel`, `flush`, `dimensions`, `name`. A backend may queue its work on its own thread. `pending` counts the events still queued, and the service thread refuses a batch that would take the queue past 1024 events. `fence` completes a caller's `InputFence` after everything posted before it. `cancel` drops queued text and moves as not applied while keeping key and button releases, and reports how many records were dropped.
 - `InputController` (`src/engine/core/input.hpp`): owns one `InputBackend`, validates each `InputEvent`, maps normalized pointer coordinates to pixels, dedupes held keys and buttons by native key id, and releases everything on `releaseAll`. `resetLocks` turns Caps Lock off when a new input session starts. It forwards `fence` and `cancel` to the backend and returns `InputStatus`: `invalid` for a rejected event, `unsupported` when the backend has no native key for a usage or cannot type a codepoint.
 - `InputQueue` (`src/engine/core/input.hpp`): the backend work queue. It counts one protocol record as one queued unit however many platform jobs that record posts, so admission, `pending`, and cancelled-record counts share one unit. `cancel` drops queued text and moves and leaves each fence it covered in worker order, so the worker completes it as not applied after the backend's fence.
+- `ClipboardBackend` (`src/engine/core/clipboard.hpp`): `read` and `write` UTF-8 text with LF line endings, each returning within about two seconds. The factory takes a `ClipboardChanged` callback that the backend calls on its own thread after every clipboard change, and returns null when the desktop has no usable clipboard. The server runs requests on one worker (`ClipboardWorker`), so a slow clipboard owner never blocks the service thread. X11 and Wayland use their own connection and thread; Windows uses a message-only window on its own thread; macOS polls the pasteboard change count every 250 ms.
 - `CaptureEncoder` takes a `CaptureSourceFactory`, so tests can inject a source with no X11.
 - The worker requires a valid fd. Core enforces the source size limits once, in the capture worker and on the input backend's dimensions at startup: width 320 to 16384 and height 240 to 16384, both even, which is the largest frame libx264 accepts. The image stride must be between width x 4 and width x 8 bytes.
 
@@ -96,12 +99,13 @@ Color: little-endian BGRA and big-endian ARGB convert to NV12 with limited-range
 
 ## Adding a backend
 
-1. Create `src/engine/backends/<os>/<name>/`, or `src/engine/backends/<os>/` when the OS has one backend, with the three functions in `namespace relay::<name>`, using the signatures declared in `src/engine/server/backend.cpp`:
+1. Create `src/engine/backends/<os>/<name>/`, or `src/engine/backends/<os>/` when the OS has one backend, with the four functions in `namespace relay::<name>`, using the signatures declared in `src/engine/server/backend.cpp`:
 
    ```cpp
    bool initializeNativeBackend(const std::string& output);
    std::unique_ptr<CaptureSource> makeCaptureSource();
    std::unique_ptr<InputBackend> makeInputBackend();
+   std::unique_ptr<ClipboardBackend> makeClipboard(ClipboardChanged changed);
    ```
 
    Backend sources can be `.mm` files, compiled as Objective-C++ with ARC.
@@ -110,7 +114,7 @@ Color: little-endian BGRA and big-endian ARGB convert to NV12 with limited-range
 3. Add a guarded entry to the `backends` array in `src/engine/server/backend.cpp`. The `Makefile` adds `-DRELAY_BACKEND_<name>` for each selected backend. The first compiled entry is the default, so keep X11 first when both backends are built.
 4. Build with `make BACKENDS=<name>`. The default is `x11`; quote a space-separated list to build multiple backends, such as `make BACKENDS="x11 wayland"`.
 5. For Wayland protocols, vendor their XML under `src/engine/backends/linux/wayland/protocols/` and add each protocol name to `WAYLAND_PROTOCOLS` in the `Makefile`. The Wayland build uses `wayland-scanner` to generate client headers and private protocol code under `build/protocols/`.
-6. Implement capture and the input primitives only: map a HID usage to a native key, press and release a native key or button, type a Unicode codepoint, move, scroll, reset locks, flush, `dimensions`, and `name`. Core owns protocol validation, coordinate mapping, held input, and the size limits. `src/engine/core/` and `src/engine/server/` must not include backend headers.
+6. Implement capture, the input primitives, and the clipboard only: map a HID usage to a native key, press and release a native key or button, type a Unicode codepoint, move, scroll, reset locks, flush, `dimensions`, and `name`. Core owns protocol validation, coordinate mapping, held input, and the size limits. `src/engine/core/` and `src/engine/server/` must not include backend headers.
 
 ## How install works
 
