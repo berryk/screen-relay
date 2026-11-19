@@ -368,3 +368,34 @@ test('--stdin reads a pipe that is still being written', async () => {
     assert.deepEqual(received, ['first second']);
   } finally { server.close(); }
 });
+
+test('clipboard help describes the fields each subcommand prints', async () => {
+  const help = spawnSync(process.execPath, [cli, 'help', 'clipboard', '--json'], { encoding: 'utf8', timeout: 15000 });
+  assert.ifError(help.error);
+  assert.equal(help.status, 0, help.stderr);
+  const helpDocument = JSON.parse(help.stdout);
+  assert.deepEqual(helpDocument.resultSchema, {});
+  const schemas = Object.fromEntries(helpDocument.subcommands.map(({ name, resultSchema }) => [name, resultSchema]));
+  const { createServer: createHttpServer } = await import('node:http');
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(request.method === 'GET' ? { text: 'hello' } : { length: Buffer.concat(chunks).length }));
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    for (const [action, args] of [['get', ['clipboard', 'get']], ['set', ['clipboard', 'set', 'hello']]]) {
+      const child = spawn(process.execPath, [cli, ...args, '--json', '--url', url], { timeout: 15000 });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
+      const printed = JSON.parse(stdout);
+      assert.deepEqual(Object.keys(schemas[action]).sort(), Object.keys(printed).sort());
+      assert.deepEqual(Object.keys(schemas[action].clipboard).sort(), Object.keys(printed.clipboard).sort());
+    }
+  } finally { server.close(); }
+});
