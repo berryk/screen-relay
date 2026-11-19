@@ -23,7 +23,7 @@ export type Parameter = {
   deferredDefault?: boolean;
   validate?: (value: unknown) => boolean;
 };
-export type Subcommand = { name: string; summary: string; examples: { description: string; command: string }[] };
+export type Subcommand = { name: string; summary: string; examples: { description: string; command: string }[]; resultSchema?: Record<string, unknown> };
 export type RunsOn = 'vm' | 'client' | 'anywhere';
 export type Command = {
   summary: string;
@@ -33,7 +33,7 @@ export type Command = {
   options: Parameter[];
   examples: { description: string; command: string }[];
   notes: string[];
-  resultSchema: Record<string, unknown>;
+  resultSchema?: Record<string, unknown>;
   separator?: string;
   usageTail?: string;
   subcommands?: Subcommand[];
@@ -140,8 +140,8 @@ export const commands: Record<string, Command> = {
     ],
     options: [...client, stdin],
     subcommands: [
-      { name: 'get', summary: 'Print the clipboard text', examples: example('Read what the desktop copied', 'screen-relay clipboard get') },
-      { name: 'set', summary: 'Replace the clipboard text', examples: example('Put a URL on the clipboard', 'screen-relay clipboard set "https://example.com"') },
+      { name: 'get', summary: 'Print the clipboard text', examples: example('Read what the desktop copied', 'screen-relay clipboard get'), resultSchema: { clipboard: { text: 'string', bytes: 'number' } } },
+      { name: 'set', summary: 'Replace the clipboard text', examples: example('Put a URL on the clipboard', 'screen-relay clipboard set "https://example.com"'), resultSchema: { clipboard: { bytes: 'number' }, outcome: 'set' } },
     ],
     examples: [
       { description: 'Read what the desktop copied', command: 'screen-relay clipboard get' },
@@ -149,7 +149,6 @@ export const commands: Record<string, Command> = {
       { description: 'Put piped text on the clipboard', command: 'screen-relay clipboard set --stdin' },
     ],
     notes: ['get prints the text exactly, with no newline added. Use --json for the text and byte count.', 'Text is UTF-8, up to 256 KiB. set "" clears the clipboard.', 'To paste the text, press the paste keys afterwards, such as screen-relay key ctrl+v.'],
-    resultSchema: { clipboard: { text: 'string', bytes: 'number' }, outcome: 'set' },
     validate: (args) => args.action === 'get' && (args.text !== undefined || args.stdin) ? 'screen-relay clipboard get takes no text'
       : args.action === 'set' ? textSource('text')(args) : undefined,
     run: cmdClipboard,
