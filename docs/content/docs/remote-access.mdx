@@ -98,7 +98,7 @@ Browser HTTP requests do follow CORS. The engine sends no `Access-Control-Allow-
 
 Earlier versions accepted any origin when the session had a token. A session with `--public` now refuses a page on another origin until you allow that origin. The built-in viewer still works on loopback when its origin uses the same `HOST:PORT` it connects to, such as `http://127.0.0.1:8080` through an SSH tunnel. Use `--allow-origin` for an embedded viewer on another origin. This enables its WebSocket connection, not cross-origin browser access to the HTTP API.
 
-An app that opens `/stream` or calls the HTTP API from its own origin now gets 403 until you allow that origin. This includes an MCP App that renders the viewer inside an AI client:
+For an embedded viewer, including an MCP App inside an AI client, allow the origin of the page that opens `/stream`:
 
 1. Find the origin the app's page runs on. In the browser's or client's developer tools, open the failed `/stream` request and read its `Origin` request header.
 2. Restart the session with that value in `--allow-origin`. A loopback value such as `http://localhost:8081` is accepted. Restarting creates a new token, so give the app the new one.
