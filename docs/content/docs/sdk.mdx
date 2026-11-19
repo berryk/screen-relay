@@ -133,7 +133,7 @@ Pass these options to `createClient`, the standalone functions, or `connect`. Co
 | `busy` | Another input owner, a full input queue, 32 pending session requests, or another screenshot. Wait for it to finish before retrying. |
 | `unauthorized`, `forbidden` | The engine rejected the token, host, or origin. Check the connection settings. |
 | `unreachable`, `timeout` | Check the URL, network, and TLS certificate. Increase `timeout` if needed. |
-| `disconnected` | The control session closed or was lost. Connect again. |
+| `disconnected` | The control session closed or an HTTP response ended before it completed. Reconnect the session. For input calls, check a screenshot before retrying. |
 | `invalid_input`, `invalid_option` | Check the URL, token, input, and options. |
 | `unsupported_input` | The backend cannot apply the event or type the character. Change the input or keyboard layout. |
 | `component_failed` | The engine could not complete the request. For screenshots, check `screen-relay logs engine` and [Wayland requirements](/docs/linux#compositors). |

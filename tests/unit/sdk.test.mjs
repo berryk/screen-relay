@@ -156,29 +156,15 @@ test('custom transport returns a normal response', async () => {
   });
 });
 
-test('custom transport settles an incomplete response before the deadline', async () => {
-  await withServer(incompleteResponseServer(), async (url) => {
-    const started = Date.now();
-    await assert.rejects(createClient({ url, connect: '127.0.0.1', timeout: 5000 }).capabilities(), (error) => {
-      assert.notEqual(error.reason, 'timeout');
-      assert.ok(error.reason === 'disconnected' || error.reason === 'unreachable', `unexpected reason ${error.reason}`);
-      return true;
+for (const [transport, options] of [['fetch', {}], ['custom', { connect: '127.0.0.1' }]]) {
+  test(`${transport} transport reports an incomplete response as disconnected`, async () => {
+    await withServer(incompleteResponseServer(), async (url) => {
+      await assert.rejects(capabilities({ ...options, url, timeout: 5000 }), {
+        code: 'DISCONNECTED', reason: 'disconnected',
+      });
     });
-    assert.ok(Date.now() - started < 4000, 'settled before the deadline');
   });
-});
-
-test('fetch transport settles an incomplete response before the deadline', async () => {
-  await withServer(incompleteResponseServer(), async (url) => {
-    const started = Date.now();
-    await assert.rejects(capabilities({ url, timeout: 5000 }), (error) => {
-      assert.notEqual(error.code, 'TIMEOUT');
-      assert.ok(error.code === 'NETWORK_ERROR' || error.code === 'PROTOCOL_ERROR', `unexpected code ${error.code}`);
-      return true;
-    });
-    assert.ok(Date.now() - started < 4000, 'settled before the deadline');
-  });
-});
+}
 
 test('custom transport bounds success and error bodies', async () => {
   for (const status of [200, 500]) {
@@ -331,7 +317,7 @@ test('screenshot body failures and file failures have stable codes', async () =>
   try {
     const session = await connect();
     globalThis.fetch = async () => new Response(new ReadableStream({ pull(controller) { controller.error(new Error('broken body')); } }));
-    await assert.rejects(session.screenshot(), { code: 'NETWORK_ERROR' });
+    await assert.rejects(session.screenshot(), { code: 'DISCONNECTED', reason: 'disconnected' });
     globalThis.fetch = async () => new Response(new Uint8Array([1, 2, 3]));
     await assert.rejects(session.screenshot('/nonexistent-directory/screen.png'), { code: 'IO_ERROR' });
     session.close();

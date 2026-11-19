@@ -75,6 +75,10 @@ function decode<Result>(data: Buffer, binary: boolean): Result {
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
+function disconnectedResponse(): RelayError {
+  return new RelayError('disconnected', 'The connection closed before the response completed.');
+}
+
 /** Reads a fetch response body while keeping it under the shared size cap. */
 async function readResponseBody(response: Awaited<ReturnType<typeof fetch>>): Promise<Buffer> {
   const stream = response.body;
@@ -127,7 +131,7 @@ function nodeRequest<Result>(server: Server, where: Extract<Plan, { kind: 'node'
       else if (error instanceof RelayError) reject(error);
       else reject(networkError(error));
     });
-    const incomplete = () => fail(new RelayError('disconnected', 'The connection closed before the response completed.'));
+    const incomplete = () => fail(disconnectedResponse());
     const transport = base.protocol === 'https:' ? httpsRequest : httpRequest;
     const sent = transport(options, (response) => {
       const chunks: Buffer[] = [];
@@ -142,7 +146,7 @@ function nodeRequest<Result>(server: Server, where: Extract<Plan, { kind: 'node'
         }
         chunks.push(chunk);
       });
-      response.once('error', fail);
+      response.once('error', incomplete);
       response.once('aborted', incomplete);
       response.once('close', () => { if (!response.complete) incomplete(); });
       response.once('end', () => settle(() => {
@@ -192,7 +196,12 @@ async function request<Result>(
         method: body === undefined ? 'GET' : 'POST', body: body === undefined ? undefined : Buffer.from(body),
       });
       if (response.ok && binary && !response.body) throw new RelayError('protocol_error', 'Missing screenshot body');
-      const data = await readResponseBody(response);
+      let data: Buffer;
+      try { data = await readResponseBody(response); }
+      catch (error) {
+        if (error instanceof RelayError) throw error;
+        throw disconnectedResponse();
+      }
       if (!response.ok) {
         let detail: { error?: string; index?: number } | null = null;
         try { detail = JSON.parse(data.toString('utf8')); } catch {}
