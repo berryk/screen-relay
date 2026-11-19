@@ -91,7 +91,7 @@ function viewer({ devicePixelRatio = 1, storage, decode = true, deferDecode = fa
     entry[1](now);
   };
   const timersAfter = (mark) => { for (const callback of timers.splice(mark)) callback(); };
-  return { context, document, listeners, windowListeners, sockets, trace, frame, tick, refresh, timerCount: () => timers.length, timersAfter, setTime: (time) => { now = time; }, decodeAll: () => { while (decodeQueue.length) decodeQueue.shift()(); } };
+  return { context, document, listeners, windowListeners, sockets, trace, frame, tick, refresh, timerCount: () => timers.length, timersAfter, runTimer: (index) => timers.splice(index, 1)[0](), setTime: (time) => { now = time; }, decodeAll: () => { while (decodeQueue.length) decodeQueue.shift()(); } };
 }
 
 const traced = (app, type) => app.trace.filter((event) => event[0] === type).map((event) => event[1]);
@@ -802,7 +802,7 @@ function pasteText(app, text) {
   app.listeners.paste({ preventDefault() {}, clipboardData: { getData: () => text } });
 }
 
-test('a paste after the copy shortcut uses the remote clipboard before a notice arrives', async () => {
+test('a paste after a copy shortcut waits for a remote clipboard notice', async () => {
   const { app, posted } = clipboardViewer('remote');
   await settle();
   chord(app, 'keydown', 'ControlLeft', { ctrlKey: true });
@@ -811,7 +811,77 @@ test('a paste after the copy shortcut uses the remote clipboard before a notice 
   pasteText(app, 'stale');
   await settle();
   assert.deepEqual(posted, []);
+  assert.deepEqual(inputBytes(app).slice(-2), [[1, 6], [2, 6]]);
+  clipboardNotice(app);
+  await settle();
+  assert.deepEqual(posted, []);
   assert.deepEqual(inputBytes(app).slice(-2), [[1, 25], [2, 25]]);
+});
+
+for (const code of ['KeyC', 'KeyX']) {
+  test(`a no-op ${code} shortcut does not block a local paste`, async () => {
+    const { app, posted } = clipboardViewer('remote');
+    await settle();
+    chord(app, 'keydown', 'ControlLeft', { ctrlKey: true });
+    const mark = app.timerCount();
+    chord(app, 'keydown', code, { ctrlKey: true });
+    chord(app, 'keyup', code, { ctrlKey: true });
+    pasteText(app, 'local');
+    assert.deepEqual(posted, []);
+    app.timersAfter(mark);
+    await settle();
+    assert.deepEqual(posted, ['local']);
+    assert.deepEqual(inputBytes(app).slice(-2), [[1, 25], [2, 25]]);
+  });
+}
+
+test('successive copy shortcuts keep the observation open until the latest window ends', async () => {
+  const { app, posted } = clipboardViewer();
+  await settle();
+  const mark = app.timerCount();
+  chord(app, 'keydown', 'KeyC', { ctrlKey: true });
+  chord(app, 'keyup', 'KeyC', { ctrlKey: true });
+  chord(app, 'keydown', 'KeyX', { ctrlKey: true });
+  chord(app, 'keyup', 'KeyX', { ctrlKey: true });
+  pasteText(app, 'local');
+  app.runTimer(mark);
+  await settle();
+  assert.deepEqual(posted, []);
+  app.timersAfter(mark);
+  await settle();
+  assert.deepEqual(posted, ['local']);
+});
+
+test('the latest remote copy notice refreshes even text that was previously synced', async () => {
+  const reads = [];
+  const { app, posted, written } = clipboardViewer('', undefined, { read: () => new Promise((resolve) => reads.push(resolve)) });
+  await settle();
+  pasteText(app, 'same');
+  await settle();
+  const mark = app.timerCount();
+  chord(app, 'keydown', 'KeyC', { ctrlKey: true });
+  chord(app, 'keyup', 'KeyC', { ctrlKey: true });
+  app.timersAfter(mark);
+  clipboardNotice(app);
+  clipboardNotice(app);
+  pasteText(app, 'stale');
+  reads[0]({ ok: true, json: async () => ({ text: 'same' }) });
+  reads[1]({ ok: true, json: async () => ({ text: 'same' }) });
+  await settle();
+  assert.deepEqual(posted, ['same']);
+  assert.deepEqual(written, ['same']);
+});
+
+test('a remote notice between the paste shortcut and paste event keeps remote precedence', async () => {
+  const { app, posted } = clipboardViewer('remote');
+  await settle();
+  chord(app, 'keydown', 'KeyV', { ctrlKey: true });
+  clipboardNotice(app);
+  await settle();
+  app.listeners.paste({ preventDefault() {}, clipboardData: { getData: () => 'stale' } });
+  await settle();
+  assert.deepEqual(posted, []);
+  assert.deepEqual(inputBytes(app), [[1, 25], [2, 25]]);
 });
 
 test('a paste during a pending remote copy does not upload stale local text', async () => {

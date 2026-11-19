@@ -330,10 +330,10 @@ test('takeover ends session input and screenshots but leaves HTTP status and cap
 });
 
 test('clipboard text round-trips as UTF-8 and engine refusals keep their reasons', async () => {
-  let stored = '', available = true;
+  let stored = '', error;
   const server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json');
-    if (!available) { response.writeHead(503); return response.end(JSON.stringify({ error: 'clipboard_unavailable' })); }
+    if (error) { response.writeHead(503); return response.end(JSON.stringify({ error })); }
     if (request.method === 'GET') return response.end(JSON.stringify({ text: stored }));
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -350,8 +350,10 @@ test('clipboard text round-trips as UTF-8 and engine refusals keep their reasons
     assert.equal(await client.clipboard(), '');
     await assert.rejects(client.setClipboard('a\0b'), { reason: 'invalid_input' });
     await assert.rejects(client.setClipboard('é'.repeat(131073)), { reason: 'invalid_input' });
-    available = false;
+    error = 'clipboard_unavailable';
     await assert.rejects(client.clipboard(), { reason: 'clipboard_unavailable' });
+    error = 'clipboard_busy';
+    await assert.rejects(client.clipboard(), { reason: 'busy', hint: 'Wait briefly, then retry.' });
   } finally {
     server.close();
     await once(server, 'close');

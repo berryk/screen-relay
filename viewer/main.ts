@@ -94,15 +94,17 @@ function releaseLatched() {
   clearLatched();
 }
 const authHeaders = () => accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
-type ClipboardState = { state: 'local' } | { state: 'remote-pending' | 'remote-unavailable' };
+type ClipboardState = { state: 'local'; copy?: boolean } | { state: 'copy-pending'; result: Promise<boolean>; resolve: (changed: boolean) => void; generation: number }
+  | { state: 'remote-pending'; copy: boolean } | { state: 'remote-unavailable' };
 type PasteState = { state: 'idle' } | {
   state: 'waiting' | 'sending'; key: number; buttons: number; modifiers: number;
-  source: 'local' | 'remote'; queue: Uint8Array[];
+  source: 'local' | 'remote'; revision: number; queue: Uint8Array[];
 };
 let paste: PasteState = { state: 'idle' }, clipboardAvailable = false;
 const MAX_PASTE_INPUT = 256;
+const COPY_OBSERVATION_MS = 500;
 let clipboard: ClipboardState = { state: 'local' };
-let syncedText: string | null = null, clipboardEpoch = 0;
+let syncedText: string | null = null, clipboardEpoch = 0, clipboardRevision = 0;
 async function readRemoteClipboard(): Promise<string | null> {
   const response = await fetch('/clipboard', { cache: 'no-store', redirect: 'error', headers: authHeaders(), signal: AbortSignal.timeout(5000) });
   const data = response.ok ? await response.json() : null;
@@ -116,14 +118,14 @@ async function writeRemoteClipboard(local: string): Promise<boolean> {
   if (clipboard === previous) { syncedText = text; clipboard = { state: 'local' }; }
   return true;
 }
-async function copyRemoteClipboard(always = false): Promise<void> {
-  const current = clipboardEpoch, pending: ClipboardState = { state: 'remote-pending' };
+async function copyRemoteClipboard(always = false, copy = false): Promise<void> {
+  const current = clipboardEpoch, pending: ClipboardState = { state: 'remote-pending', copy };
   clipboard = pending;
   try {
     const text = await readRemoteClipboard();
     if (current !== clipboardEpoch || clipboard !== pending || !document.hasFocus()) return;
     if (text === null) throw new Error('unavailable');
-    if (!always && text === syncedText) { clipboard = { state: 'local' }; return; }
+    if (!always && !copy && text === syncedText) { clipboard = { state: 'local' }; return; }
     if (!always && !text) { clipboard = { state: 'remote-unavailable' }; return; }
     await navigator.clipboard.writeText(text);
     if (current === clipboardEpoch && clipboard === pending) { syncedText = text; clipboard = { state: 'local' }; }
@@ -133,8 +135,26 @@ async function copyRemoteClipboard(always = false): Promise<void> {
   }
 }
 function remoteClipboardChanged() {
-  if (document.hasFocus() && navigator.clipboard) copyRemoteClipboard().catch(() => {});
+  clipboardRevision++;
+  const intent = clipboard.state === 'copy-pending' ? clipboard : null;
+  const copy = Boolean(intent) || ((clipboard.state === 'local' || clipboard.state === 'remote-pending') && Boolean(clipboard.copy));
+  if (document.hasFocus() && navigator.clipboard) copyRemoteClipboard(false, copy).catch(() => {});
   else clipboard = { state: 'remote-unavailable' };
+  intent?.resolve(true);
+}
+function expectRemoteCopy() {
+  if (paste.state !== 'idle' || (clipboard.state !== 'local' && clipboard.state !== 'copy-pending')) return;
+  if (clipboard.state === 'local') {
+    let resolve!: (changed: boolean) => void;
+    const result = new Promise<boolean>((done) => { resolve = done; });
+    clipboard = { state: 'copy-pending', result, resolve, generation: 0 };
+  }
+  const intent = clipboard, generation = ++intent.generation;
+  setTimeout(() => {
+    if (clipboard !== intent || intent.generation !== generation) return;
+    clipboard = { state: 'local', copy: true };
+    intent.resolve(false);
+  }, COPY_OBSERVATION_MS);
 }
 function finishPaste(current: Exclude<PasteState, { state: 'idle' }>, replay: boolean) {
   if (paste !== current) return;
@@ -150,7 +170,7 @@ function finishPaste(current: Exclude<PasteState, { state: 'idle' }>, replay: bo
 }
 function holdBackPaste(e: KeyboardEvent, key: number): boolean {
   if (viewOnly || !clipboardAvailable || paste.state !== 'idle' || e.code !== 'KeyV' || e.altKey || !(e.ctrlKey || e.metaKey)) return false;
-  const waiting = { state: 'waiting' as const, key, buttons, modifiers, source: clipboard.state === 'local' ? 'local' as const : 'remote' as const, queue: [] };
+  const waiting = { state: 'waiting' as const, key, buttons, modifiers, revision: clipboardRevision, source: clipboard.state === 'local' || clipboard.state === 'copy-pending' ? 'local' as const : 'remote' as const, queue: [] };
   paste = waiting;
   setTimeout(() => finishPaste(waiting, true), 0);
   return true;
@@ -159,13 +179,19 @@ document.addEventListener('paste', (e) => {
   if (paste.state !== 'waiting') return;
   e.preventDefault();
   const text = e.clipboardData?.getData('text/plain');
-  if (!text || paste.source === 'remote' || clipboard.state !== 'local') { finishPaste(paste, true); return; }
-  const sending = { ...paste, state: 'sending' as const };
+  if (!text || paste.source === 'remote' || paste.revision !== clipboardRevision || (clipboard.state !== 'local' && clipboard.state !== 'copy-pending')) { finishPaste(paste, true); return; }
+  const sending = { ...paste, state: 'sending' as const }, intent = clipboard.state === 'copy-pending' ? clipboard : null;
   paste = sending;
-  writeRemoteClipboard(text).then(
-    (ok) => finishPaste(sending, ok),
-    () => finishPaste(sending, false),
-  );
+  const send = () => {
+    if (paste !== sending) return;
+    if (clipboard.state !== 'local') { finishPaste(sending, true); return; }
+    writeRemoteClipboard(text).then(
+      (ok) => finishPaste(sending, ok),
+      () => finishPaste(sending, false),
+    );
+  };
+  if (intent) intent.result.then((changed) => changed ? finishPaste(sending, true) : send());
+  else send();
 });
 
 function sendInput(event: InputEvent): boolean {
@@ -197,7 +223,8 @@ function dropLatch(code: number): boolean {
 function release() {
   clipboardEpoch++;
   syncedText = null;
-  if (clipboard.state !== 'local') clipboard = { state: 'remote-unavailable' };
+  if (clipboard.state === 'copy-pending') { clipboard.resolve(false); clipboard = { state: 'local' }; }
+  else if (clipboard.state !== 'local') clipboard = { state: 'remote-unavailable' };
   paste = { state: 'idle' };
   buttons = modifiers = 0;
   if (ready) sendInput({ type: 'releaseAll' });
@@ -524,7 +551,7 @@ canvas.addEventListener('keydown', (e) => {
   if (e.repeat || held.has(code)) return;
   if (!holdKey(code)) return;
   if (clipboardAvailable && !e.altKey && (e.ctrlKey || e.metaKey) && (e.code === 'KeyC' || e.code === 'KeyX')) {
-    clipboard = { state: 'remote-unavailable' };
+    expectRemoteCopy();
   }
   held.add(code);
   if (code < 224) releaseLatched();
