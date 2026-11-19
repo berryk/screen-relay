@@ -91,9 +91,11 @@ The engine sends no CORS headers. A browser page on another origin can open a We
 | 405 `method_not_allowed` | Use the method listed for the endpoint. |
 | 409 `busy` | Close the input owner or wait, then check for partial input before retrying. A viewer that owns input is one owner; a view-only viewer is not. |
 | 411 `length_required` | Include `Content-Length` on `POST /input` and `POST /clipboard`. |
-| 413 `too_large` | Send no more than 256 input records per request, or 256 KiB of clipboard text. `GET /clipboard` returns it when the clipboard holds more. |
+| 413 `too_large` | Send no more than 256 input records per request or 256 KiB of clipboard text. |
+| 413 `clipboard_too_large` | The clipboard holds more than the 256 KiB read limit. |
 | 422 `unsupported_input` | Change the input or keyboard layout. |
-| 503 `busy` | Wait for the other screenshot or clipboard requests to finish. |
+| 503 `busy` | Wait for the other screenshot request to finish. |
+| 503 `clipboard_busy` | Wait for the clipboard request queue to drain, then retry. |
 | 503 `clipboard_unavailable` | The desktop has no clipboard the engine can use, or the app that owns the clipboard did not answer within 2 seconds. Check `capabilities.clipboard`. |
 | 503 `screenshot_unavailable` | Check `screen-relay logs engine` and try again. |
 

@@ -3,15 +3,18 @@ import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 import { createClient } from "../../dist/sdk/index.js";
 import { originOf, ownerToken, VIEWER_SCOPE } from "./config.ts";
-import { mintGrant } from "./grants.ts";
+import { mintGrant, revokeGrant } from "./grants.ts";
 import { runInSandbox } from "./sandbox.ts";
 import { RESOURCE_URI } from "./viewer.ts";
 
 /** Registers the desktop, screenshot, and automation tools on a server. */
-export function registerTools(server: McpServer): void {
+export function registerTools(server: McpServer): () => Promise<void> {
   let sessionUrl: string | undefined;
   let grant: Awaited<ReturnType<typeof mintGrant>> | undefined;
   let pendingGrant: ReturnType<typeof mintGrant> | undefined;
+  let closing: Promise<void> | undefined;
+  let closed = false;
+  const owned = new Map<string, { origin: URL; owner: string; revokeUntil: number }>();
 
   registerAppTool(
     server,
@@ -25,19 +28,26 @@ export function registerTools(server: McpServer): void {
       _meta: { ui: { resourceUri: RESOURCE_URI } },
     },
     async ({ url }) => {
+      if (closed) throw new Error("The MCP session is closed.");
       const viewer = originOf(url);
-      if (!grant || grant.expiresAt <= Date.now()) {
-        const pending = pendingGrant ??= mintGrant(viewer, ownerToken(), VIEWER_SCOPE);
+      if (!grant || grant.refreshAt <= Date.now()) {
+        const owner = ownerToken();
+        const pending = pendingGrant ??= mintGrant(viewer, owner, VIEWER_SCOPE).then((issued) => {
+          for (const [id, item] of owned) if (item.revokeUntil <= Date.now()) owned.delete(id);
+          owned.set(issued.id, { origin: viewer, owner, revokeUntil: issued.revokeUntil });
+          return issued;
+        });
         try {
           grant = await pending;
         } finally {
           if (pendingGrant === pending) pendingGrant = undefined;
         }
       }
+      if (closed) throw new Error("The MCP session is closed.");
       sessionUrl = viewer.href;
       return {
         content: [{ type: "text", text: "Viewer access is ready. The inline viewer still needs to connect. Look for Live in the viewer, or use desktop_screenshot for a still image." }],
-        _meta: { "relay/viewer": { url: viewer.href, ...grant } },
+        _meta: { "relay/viewer": { url: viewer.href, token: grant.token, scope: grant.scope, expiresAt: grant.expiresAt } },
       };
     },
   );
@@ -80,4 +90,16 @@ export function registerTools(server: McpServer): void {
     },
     async ({ args }) => runInSandbox("/vercel/relay/node_modules/.bin/agent-browser", args),
   );
+
+  return () => {
+    if (closing) return closing;
+    closed = true;
+    closing = (async () => {
+      await pendingGrant?.catch(() => {});
+      await Promise.all([...owned].map(([id, item]) => revokeGrant(item.origin, item.owner, id)));
+      owned.clear();
+      grant = undefined;
+    })();
+    return closing;
+  };
 }
