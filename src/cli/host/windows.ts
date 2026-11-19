@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Failure } from '../output.js';
 import { run } from './common.js';
@@ -155,39 +155,54 @@ function privateMsys2Acl(account: string): string[] {
   return [MSYS2_ROOT, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', `*${account}:(OI)(CI)F`, '*S-1-5-32-545:(OI)(CI)RX'];
 }
 
-/** Creates the MSYS2 root with its access rules before the installer writes to it. Returns false when the root already exists, is not empty, or does not pass the check. */
-export function createPrivateMsys2Root(): boolean {
-  if (process.platform !== 'win32') return false;
+/** Creates a private MSYS2 root and returns a function that removes that same root if it is still empty. */
+export function createPrivateMsys2Root(): (() => boolean) | null {
+  if (process.platform !== 'win32') return null;
   try {
     mkdirSync(MSYS2_ROOT);
   } catch {
-    return false;
+    return null;
   }
+  let identity: { dev: bigint; ino: bigint };
+  try {
+    const root = lstatSync(MSYS2_ROOT, { bigint: true });
+    if (!root.isDirectory() || root.ino === 0n) return null;
+    identity = { dev: root.dev, ino: root.ino };
+  } catch {
+    return null;
+  }
+  const discard = () => {
+    try {
+      const root = lstatSync(MSYS2_ROOT, { bigint: true });
+      if (!root.isDirectory() || root.dev !== identity.dev || root.ino !== identity.ino) return false;
+      rmdirSync(MSYS2_ROOT);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      forgetMsys2Installation();
+    }
+  };
+  const fail = () => { discard(); return null; };
   const emptyBefore = (() => {
     try { return readdirSync(MSYS2_ROOT).length === 0; } catch { return false; }
   })();
-  if (!emptyBefore) return discardEmptyMsys2Root();
+  if (!emptyBefore) return fail();
   const first = aclProbe();
-  if (!first || !/^S-\d+(-\d+)+$/.test(first.current)) return discardEmptyMsys2Root();
-  if (first.objects.some((object) => object.reparse)) return discardEmptyMsys2Root();
+  if (!first || !/^S-\d+(-\d+)+$/.test(first.current)) return fail();
+  if (first.objects.some((object) => object.reparse)) return fail();
   const emptyBeforeAcl = (() => {
     try { return readdirSync(MSYS2_ROOT).length === 0; } catch { return false; }
   })();
-  if (!emptyBeforeAcl) return discardEmptyMsys2Root();
+  if (!emptyBeforeAcl) return fail();
   const applied = run([systemTool('icacls.exe'), ...privateMsys2Acl(first.current)], { timeout: 120000 }).status === 0;
   const probe = aclProbe();
   const emptyAfter = (() => {
     try { return readdirSync(MSYS2_ROOT).length === 0; } catch { return false; }
   })();
   forgetMsys2Installation();
-  if (!applied || !probe || !trustedAcl(probe).trusted || !emptyAfter) return discardEmptyMsys2Root();
-  return true;
-}
-
-/** Removes the MSYS2 root only when it is empty, so setup never deletes files it did not create. */
-function discardEmptyMsys2Root(): boolean {
-  try { rmdirSync(MSYS2_ROOT); } catch {}
-  return false;
+  if (!applied || !probe || !trustedAcl(probe).trusted || !emptyAfter) return fail();
+  return discard;
 }
 
 /** Reads the owners and allow rules of the MSYS2 paths from PowerShell, or null when it cannot report them. */

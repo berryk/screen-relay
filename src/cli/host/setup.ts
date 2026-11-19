@@ -122,12 +122,23 @@ function packageWork(groups: string[], args: Args): { manager: string; packages:
           if (!winget || run([winget, '--version']).status !== 0) {
             throw new Failure('missing_dependency', 'MSYS2 is not installed, and winget is not available to install it', 'Install App Installer, or install MSYS2 from https://www.msys2.org with the access rules in the Windows guide, then run screen-relay install again.');
           }
-          if (!createPrivateMsys2Root()) {
+          const discardRoot = createPrivateMsys2Root();
+          if (!discardRoot) {
             throw new Failure('missing_dependency', `Setup could not create a private ${MSYS2_ROOT}`, `Run screen-relay install from an elevated terminal. If ${MSYS2_ROOT} exists, delete it first.`);
           }
-          await step('Installing MSYS2', 'Installed MSYS2', `winget ${WINGET_MSYS2.join(' ')}`, args, true, [winget, ...WINGET_MSYS2]);
+          try {
+            await step('Installing MSYS2', 'Installed MSYS2', `winget ${WINGET_MSYS2.join(' ')}`, args, true, [winget, ...WINGET_MSYS2]);
+          } catch (error) {
+            if (!discardRoot() && error instanceof Failure) {
+              throw new Failure(error.reason, error.message, `Check ${MSYS2_ROOT} before retrying. Back up any files you need, then remove the incomplete installation and run screen-relay install again.`, error.data);
+            }
+            throw error;
+          }
           const installed = msys2Installation();
-          if (installed.state !== 'trusted') throw msys2Failure(installed);
+          if (installed.state !== 'trusted') {
+            if (discardRoot()) throw msys2Failure({ state: 'missing', root: MSYS2_ROOT });
+            throw msys2Failure(installed);
+          }
         }
         const keyring = '{ [ -d /etc/pacman.d/gnupg ] || { pacman-key --init && pacman-key --populate msys2 && gpgconf --kill all; }; }';
         await step('Installing MSYS2 packages', 'Installed MSYS2 packages', `${keyring} && pacman -Sy --noconfirm --needed ${MSYS2_PACKAGES.join(' ')}`, args);

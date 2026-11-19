@@ -407,6 +407,43 @@ test('install on Windows without MSYS2 or winget names MSYS2 and its download pa
   await withEnv('LOCALAPPDATA', undefined, () => onPlatform('win32', () => assert.rejects(cmdInstall({ command: 'install', json: true, name: 'default', backend: 'windows', yes: true }), { reason: 'missing_dependency', message: /MSYS2/, hint: /https:\/\/www\.msys2\.org/ })));
 });
 
+test('Windows bootstrap retries only when its installer left the new root empty', { skip: process.platform === 'win32' }, () => {
+  for (const mode of ['failed', 'missing-shell', 'partial', 'preexisting']) {
+    const cwd = join(directory, `bootstrap-${mode}`);
+    const system = join(cwd, 'system');
+    const appData = join(cwd, 'appdata');
+    const powershell = join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const icacls = join(system, 'System32', 'icacls.exe');
+    const winget = join(appData, 'Microsoft', 'WindowsApps', 'winget.exe');
+    const marker = join(cwd, 'calls');
+    const msysRoot = join(cwd, 'C:\\msys64');
+    mkdirSync(cwd, { recursive: true });
+    for (const path of [powershell, icacls, winget]) mkdirSync(join(path, '..'), { recursive: true });
+    const probe = { current: 'S-1-5-21-123', objects: [{ path: 'C:\\msys64', directory: true, reparse: false, owner: 'S-1-5-21-123', rules: [] }] };
+    writeFileSync(powershell, `#!/bin/sh\nprintf '%s' '${JSON.stringify(probe)}'\n`, { mode: 0o755 });
+    writeFileSync(icacls, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(winget, `#!/bin/sh\n[ "$1" = --version ] && exit 0\necho install >> ${JSON.stringify(marker)}\n${mode === 'partial' ? `touch ${JSON.stringify(join(msysRoot, 'partial'))}\n` : ''}exit ${mode === 'missing-shell' ? 0 : 1}\n`, { mode: 0o755 });
+    if (mode === 'preexisting') mkdirSync(msysRoot);
+    const script = `Object.defineProperty(process, 'platform', { value: 'win32' });
+const { cmdInstall } = await import(${JSON.stringify(pathToFileURL(bundlePath).href)});
+for (let i = 0; i < 2; i++) {
+  try { await cmdInstall({ command: 'install', json: true, name: 'default', backend: 'windows', yes: true }); }
+  catch (error) { console.log(JSON.stringify({ message: error.message, hint: error.hint })); }
+}`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd, encoding: 'utf8', timeout: 60000,
+      env: { ...process.env, SystemRoot: system, LOCALAPPDATA: appData, XDG_DATA_HOME: join(cwd, 'data'), XDG_STATE_HOME: join(cwd, 'state'), XDG_CONFIG_HOME: join(cwd, 'config') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const errors = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(errors.length, 2);
+    const calls = existsSync(marker) ? readFileSync(marker, 'utf8').trim().split('\n').length : 0;
+    assert.equal(calls, mode === 'preexisting' ? 0 : mode === 'partial' ? 1 : 2, mode);
+    assert.equal(existsSync(msysRoot), mode === 'partial' || mode === 'preexisting', mode);
+    if (mode === 'partial') assert.match(errors[0].hint, /incomplete installation/);
+  }
+});
+
 test('install on Windows reports unchanged when the engine already has the windows backend', { skip: process.platform === 'win32' }, () => {
   writeEngine('#!/bin/sh\nif [ "$1" = --help ]; then echo \'Compiled backends: windows\'; exit 0; fi\nexit 1\n');
   const result = onWindowsProcess(`await cmdInstall({ command: 'install', json: true, name: 'default', backend: 'windows' });`);
