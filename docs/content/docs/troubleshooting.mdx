@@ -45,6 +45,8 @@ Stopping a session also stops the processes it started. On Windows, apps started
 | Symptom | Cause and fix |
 | --- | --- |
 | WebCodecs unavailable or a decoder error | Use a browser with H.264 WebCodecs, and open the viewer over `https://` or `http://127.0.0.1`. Check the viewer status. |
+| The viewer repeatedly fails to connect when other viewers are open | Only four viewers can connect at once. Close a viewer and reconnect. |
+| Ctrl+V or Cmd+V pastes the desktop's old clipboard, or a desktop copy does not reach your computer | The viewer needs control and a secure context: open it over `https://` or `http://127.0.0.1`. Check that `capabilities.clipboard` is `true`; on Wayland, the compositor must provide `wlr-data-control`. Use the **Clipboard** button to copy or send the text by hand. |
 | The viewer cannot connect through a proxy | Forward WebSocket upgrades, preserve `Host` and `Origin`, and use the `--public` URL. See [Remote access](/docs/remote-access). |
 | The picture is too small or blurry | Under **Scaling**, choose **Actual size** or **Sharp pixels**. To resize the desktop, set `display.resolution` and restart. With `--display`, screen-relay uses the existing screen size. See [Configuration](/docs/configuration). |
 | The desktop streams at about 60 fps although `stream.fps` is higher | A compositor repaints at most 60 times a second. See [The desktop holds at 60 fps](#the-desktop-holds-at-60-fps). |
@@ -82,7 +84,8 @@ To confirm, compare the frame rate in the viewer's **Stream statistics**, which 
 | Symptom | Cause and fix |
 | --- | --- |
 | `unauthorized` (HTTP 401) | Token missing or wrong. Run `screen-relay status --show-token` on the VM, and update the file used by `--token-file` or `SCREEN_RELAY_TOKEN_FILE`. For the viewer, open the link printed by `screen-relay up`. Each `screen-relay up` that needs a token creates a new one. |
-| `forbidden` (HTTP 403) | `Host` or `Origin` not allowed. Connect through `127.0.0.1`, `localhost`, or the `--public` URL. Configure the proxy to preserve both headers. |
+| `forbidden` (HTTP 403) | `Host` or `Origin` not allowed. Connect through `127.0.0.1`, `localhost`, or the `--public` URL. With `--public`, a browser on loopback can connect to the same loopback host and port without an allowlist entry. Configure the proxy to preserve both headers. For a browser page on another origin, see [Browser origins](/docs/remote-access#browser-origins). |
+| The stream works but metrics or capabilities fail in an embedded viewer | The engine sends no CORS headers, so a page on another origin cannot read HTTP responses even when `--allow-origin` lists it. Serve the viewer at the same origin as the relay URL it uses. A loopback page on a different port is still cross-origin. See [Embedded viewers and CORS](/docs/remote-access#embedded-viewers-and-cors). |
 | `invalid_input` about a URL or plain HTTP | Use an HTTPS origin with no path, query, or credentials, and pass a token for remote hosts. Plain HTTP works only for `localhost` and `127.0.0.1`. Use an [SSH tunnel](/docs/remote-access) if needed. |
 | `unreachable` | Check the URL, and run `screen-relay status` on the VM. If the certificate was rejected, use one the client trusts. |
 

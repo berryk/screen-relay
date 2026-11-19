@@ -39,6 +39,21 @@ test('every metadata example parses through the command parser', () => {
   }
 });
 
+test('--allow-origin takes exact HTTPS and loopback HTTP origins from the flag or the environment', () => {
+  const origins = 'https://app.example.com,https://host.example.net:8443,http://localhost:8081,http://127.0.0.1:3000';
+  assert.equal(parseCommand(['up', '--allow-origin', origins], {})['allow-origin'], origins);
+  assert.equal(parseCommand(['up'], { SCREEN_RELAY_ALLOW_ORIGIN: origins })['allow-origin'], origins);
+  assert.equal(parseCommand(['up'], {})['allow-origin'], undefined);
+  for (const value of ['*', 'null', 'https://*.example.com', 'http://app.example.com', 'http://app.example.com:8081',
+    'http://localhost:80', 'http://127.0.0.1:80', 'http://LOCALHOST:8081', 'http://localhost.evil:8081',
+    'http://localhost:8081/', 'http://localhost:08081', 'http://[::1]:8081', 'https://App.example.com',
+    'https://app.example.com/', 'https://app.example.com:443', 'https://app.example.com:65536', 'https://user@app.example.com',
+    'https://a.example.com, https://b.example.com', 'https://a.example.com,', Array.from({ length: 17 }, (_, index) => `https://h${index}.example.com`).join(',')]) {
+    assert.throws(() => parseCommand(['up', '--allow-origin', value], {}), /Invalid allow-origin/, value);
+    assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ALLOW_ORIGIN: value }), /Invalid SCREEN_RELAY_ALLOW_ORIGIN/, value);
+  }
+});
+
 test('an empty SCREEN_RELAY_CONFIG is treated as unset', () => {
   assert.equal(parseCommand(['up'], { SCREEN_RELAY_CONFIG: '' }).config, undefined);
 });
@@ -401,4 +416,62 @@ test('piped help and errors contain no ANSI escape codes', () => {
     assert.ifError(result.error);
     assert.doesNotMatch(result.stdout + result.stderr, /\u001b\[/);
   }
+});
+
+test('--stdin reads a pipe that is still being written', async () => {
+  const received = [];
+  const { createServer: createHttpServer } = await import('node:http');
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push(Buffer.concat(chunks).toString('utf8'));
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ length: Buffer.concat(chunks).length }));
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const child = spawn(process.execPath, [cli, 'clipboard', 'set', '--stdin', '--json', '--url', `http://127.0.0.1:${server.address().port}`], { timeout: 15000 });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.stdin.write('first ');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    child.stdin.end('second');
+    const status = await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(status, 0, stderr);
+    assert.deepEqual(JSON.parse(stdout), { clipboard: { bytes: 12 }, outcome: 'set' });
+    assert.deepEqual(received, ['first second']);
+  } finally { server.close(); }
+});
+
+test('clipboard help describes the fields each subcommand prints', async () => {
+  const help = spawnSync(process.execPath, [cli, 'help', 'clipboard', '--json'], { encoding: 'utf8', timeout: 15000 });
+  assert.ifError(help.error);
+  assert.equal(help.status, 0, help.stderr);
+  const helpDocument = JSON.parse(help.stdout);
+  assert.deepEqual(helpDocument.resultSchema, {});
+  const schemas = Object.fromEntries(helpDocument.subcommands.map(({ name, resultSchema }) => [name, resultSchema]));
+  const { createServer: createHttpServer } = await import('node:http');
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(request.method === 'GET' ? { text: 'hello' } : { length: Buffer.concat(chunks).length }));
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    for (const [action, args] of [['get', ['clipboard', 'get']], ['set', ['clipboard', 'set', 'hello']]]) {
+      const child = spawn(process.execPath, [cli, ...args, '--json', '--url', url], { timeout: 15000 });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
+      const printed = JSON.parse(stdout);
+      assert.deepEqual(Object.keys(schemas[action]).sort(), Object.keys(printed).sort());
+      assert.deepEqual(Object.keys(schemas[action].clipboard).sort(), Object.keys(printed.clipboard).sort());
+    }
+  } finally { server.close(); }
 });

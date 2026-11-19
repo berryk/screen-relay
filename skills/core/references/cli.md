@@ -13,7 +13,7 @@ screen-relay install [--backend x11|wayland|all|macos|windows] [--desktop xfce|n
          [--config FILE] [--yes]
 screen-relay up [-d] [--name NAME] [--config FILE] [--port PORT] [--desktop xfce|none|COMMAND]
          [--display DISPLAY] [--backend x11|wayland|macos|windows] [--output NAME|DISPLAY_ID]
-         [--public HTTPS_URL] [--tls-cert FILE --tls-key FILE]
+         [--public HTTPS_URL] [--allow-origin ORIGINS] [--tls-cert FILE --tls-key FILE]
          [--bind ADDRESS] [--timeout SECONDS] [--yes]
 screen-relay down [--name NAME]
 screen-relay logs [component] [--name NAME] [-f|--follow]
@@ -33,7 +33,8 @@ screen-relay doctor [--config FILE]
   - `--backend x11|wayland|macos|windows`: on Linux, defaults to `x11` when the engine has it, else `wayland`. A `--display` without a colon, such as `wayland-1`, selects `wayland` on its own. On macOS the only backend is `macos`, and on Windows it is `windows`. `x11` and `wayland` fail there with `invalid_input`, and `macos` fails on Linux the same way.
   - `--output NAME|DISPLAY_ID`: capture this Wayland output by name, a macOS display by its CGDirectDisplayID, or a Windows display such as `'\\.\DISPLAY2'`. `up` fails on x11.
   - `--yes`: when setup is needed, set it up without asking. Without a terminal, `up` never prompts and fails with `missing_input` unless `--yes` is given.
-  - `--public HTTPS_URL`: advertises an HTTPS origin without changing the listen address. Expects a TLS proxy unless `--tls-cert` is set.
+  - `--public HTTPS_URL`: advertises an HTTPS origin without changing the listen address. Expects a TLS proxy unless `--tls-cert` is set. Browser pages must be served from this origin, a loopback page connecting to the same address, or an origin in `--allow-origin`.
+  - `--allow-origin ORIGINS`: comma-separated exact origins whose browser pages may also connect: lowercase `https://HOST[:PORT]` for any host, or `http://localhost[:PORT]` and `http://127.0.0.1[:PORT]` for a page served on the machine itself. No wildcards. Creates a token. Env: `SCREEN_RELAY_ALLOW_ORIGIN`.
   - `--bind ADDRESS`: listen address. Defaults to `127.0.0.1`, including with `--public`; another address generates a token.
   - Backend setup: [Wayland](wayland.md) and [macOS](macos.md).
 - `down` stops the session and everything it started. On Windows, apps started with `run` keep running. It is safe to repeat. JSON outcome: `stopped` or `unchanged`.
@@ -56,6 +57,9 @@ screen-relay type <text>
 screen-relay type --stdin
 screen-relay input <json>
 screen-relay input --stdin
+screen-relay clipboard get
+screen-relay clipboard set <text>
+screen-relay clipboard set --stdin
 ```
 
 - `status` with no URL reads the local session and exits 0 for any existing session. With `--url` (or `SCREEN_RELAY_URL`), it queries a remote engine. A missing session is `not_running`, exit 1.
@@ -69,6 +73,7 @@ screen-relay input --stdin
 - `key` presses each physical combo in order, for example `ctrl+l`, `Enter`, `alt+Tab` and `cmd+shift+t`.
 - `type` sends text events. `--stdin` reads the text from standard input.
 - `input` sends a JSON array of 1 to 256 SDK input events, for example `screen-relay input '[{"type":"keyDown","key":4},{"type":"keyUp","key":4}]'`.
+- `clipboard get` prints the desktop's clipboard text exactly, with no newline added. `clipboard set` replaces it; `set ""` clears it. Text is UTF-8, up to 256 KiB. It works while another client owns input. `set` does not paste: press `ctrl+v` (`super+v` on macOS) afterward. A desktop without a usable clipboard returns `clipboard_unavailable`.
 
 ## Skills
 
@@ -98,6 +103,8 @@ With `--json`, success is one document on stdout, with a trailing newline, and s
 | `screen-relay status --json` | `{"session":{...}}` |
 | `screen-relay screenshot file.png --json` | `{"screenshot":{"path","width","height","bytes"},"outcome":"saved"}` |
 | `screen-relay click`, `move`, `scroll`, `key`, `type`, `input` | `{"input":{"events":N},"outcome":"sent"}` |
+| `screen-relay clipboard get --json` | `{"clipboard":{"text":"...","bytes":N}}` |
+| `screen-relay clipboard set TEXT --json` | `{"clipboard":{"bytes":N},"outcome":"set"}` |
 | `screen-relay run -- APP --json` | `{"app":{"pid":N,"command":["APP"]},"outcome":"started"}` |
 | `screen-relay logs engine --json` | `{"logs":{"engine":"..."}}` |
 | `screen-relay doctor --json` | `{"checks":[...],"summary":{"ok","passed","warnings","failed"}}` |

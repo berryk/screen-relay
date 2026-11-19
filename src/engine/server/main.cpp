@@ -30,16 +30,16 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, signalStop); std::signal(SIGTERM, signalStop);
   relay::Server s(config);
   std::string captureError;
-  if (!s.capture.start(captureError)) {
+  if (!s.streams[0]->capture.start(captureError)) {
     std::cerr << "Capture startup failed: " << captureError << '\n';
-    s.capture.stop(); return 1;
+    s.streams[0]->capture.stop(); return 1;
   }
   try {
     s.input = std::make_unique<relay::InputController>(backend.input());
     const auto dimensions = s.input->dimensions();
     relay::requireSurfaceSize(dimensions.first, dimensions.second);
     s.width = dimensions.first; s.height = dimensions.second;
-  } catch (const std::exception& error) { std::cerr << error.what() << '\n'; s.capture.stop(); return 1; }
+  } catch (const std::exception& error) { std::cerr << error.what() << '\n'; s.streams[0]->capture.stop(); return 1; }
   lws_protocols protocols[] = {{"http", relay::callback, sizeof(relay::HttpResponse), 4096, 0, nullptr, 0}, {"nsl1", relay::callback, sizeof(relay::HttpResponse), 4096, 0, nullptr, 0}, {nullptr, nullptr, 0, 0, 0, nullptr, 0}};
   lws_context_creation_info info{};
   info.port=int(config.port); info.iface=config.bind.c_str(); info.protocols=protocols; info.user=&s;
@@ -52,16 +52,21 @@ int main(int argc, char** argv) {
   }
   info.uid=-1; info.gid=-1;
   s.context=lws_create_context(&info);
-  if (!s.context) { std::cerr << "Cannot listen on " << config.bind << ':' << config.port << '\n'; s.capture.stop(); return 1; }
+  if (!s.context) { std::cerr << "Cannot listen on " << config.bind << ':' << config.port << '\n'; s.streams[0]->capture.stop(); return 1; }
   s.wake->set(s.context);
   s.screenshot.start(s.context);
+  std::unique_ptr<relay::ClipboardBackend> clipboard;
+  try {
+    clipboard = backend.clipboard([&s] { s.clipboard_changed = true; s.wake->cancel(); });
+  } catch (const std::exception& error) { std::cerr << "Clipboard unavailable: " << error.what() << '\n'; }
+  s.clipboard.start(std::move(clipboard), [wake = s.wake] { wake->cancel(); });
   heartbeatContext=s.context;
   lws_sul_schedule(s.context, 0, &heartbeat, heartbeatTick, 100000);
   int result = 0;
   std::cerr << "Relay listening on " << config.bind << ':' << config.port << '\n';
   std::cout << "{\"ready\":true,\"pid\":" << getpid() << ",\"port\":" << config.port << "}" << std::endl;
   while (!stopping) {
-    captureError = s.capture.error();
+    captureError = s.streams[0]->capture.error();
     if (!captureError.empty()) {
       std::cerr << "Capture worker failed: " << captureError << '\n';
       result = 1; break;
@@ -70,9 +75,10 @@ int main(int argc, char** argv) {
       std::cerr << "WebSocket service failed\n";
       result = 1; break;
     }
+    s.expireGrants();
   }
-  s.end(); s.capture.stop(); s.screenshot.stop(); s.input.reset();
-  const auto stats=s.capture.stats();
+  s.end(); s.streams[0]->capture.stop(); s.screenshot.stop(); s.clipboard.stop(); s.input.reset();
+  const auto stats=s.streams[0]->capture.stats();
   std::cerr << "capture_stats captures=" << stats.captures << " encoded=" << stats.encoded
             << " capture_ns=" << stats.capture_ns << " convert_ns=" << stats.convert_ns << " encode_ns=" << stats.encode_ns << '\n';
   lws_sul_cancel(&heartbeat);

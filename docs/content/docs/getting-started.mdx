@@ -78,7 +78,9 @@ On the VM, start a terminal on the default X11 desktop:
 screen-relay run -- xfce4-terminal
 ```
 
-The command prints the process ID. Wait for the terminal to appear in the viewer. The viewer watches without owning input, so the commands below work while it is open. Choose **Take control** in the viewer to drive the desktop from the browser, and **Release control** to hand input back to the CLI.
+The command prints the process ID. Wait for the terminal to appear in the viewer. If the viewer has control, choose **Release control** before running the input commands below. The viewer stays open so you can watch the result.
+
+While the viewer has control, the clipboard follows you. Press Ctrl+V, or Cmd+V on a Mac, to paste your computer's clipboard text into the desktop. Text you copy on the desktop while the viewer has focus lands on your computer's clipboard. The **Clipboard** button in the viewer copies or sends the text by hand.
 
 ```sh
 screen-relay screenshot screen.png

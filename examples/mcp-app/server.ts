@@ -13,6 +13,7 @@ const defaultIdleMs = 30 * 60_000;
 type Session = {
   transport: NodeStreamableHTTPServerTransport;
   server: McpServer;
+  closeGrants: () => Promise<void>;
   lastSeen: number;
 };
 
@@ -31,8 +32,10 @@ async function closeSession(id: string): Promise<void> {
   const session = sessions.get(id);
   if (!session) return;
   sessions.delete(id);
+  const cleanup = session.closeGrants();
   await session.transport.close().catch(() => {});
   await session.server.close().catch(() => {});
+  await cleanup;
 }
 
 /** Closes sessions left idle past the timeout, so a host that reconnects without terminating does not pile them up. */
@@ -45,11 +48,12 @@ const sweeper = setInterval(() => {
 sweeper.unref();
 
 /** Builds a server with the screen-relay tools and viewer resource. */
-export function createServer(): McpServer {
+export function createServer(): { server: McpServer; closeGrants: () => Promise<void> } {
   const server = new McpServer({ name: "relay-mcp-app", version: "0.1.0" });
-  registerTools(server);
+  const closeGrants = registerTools(server);
+  server.server.onclose = () => { void closeGrants(); };
   registerViewer(server);
-  return server;
+  return { server, closeGrants };
 }
 
 /** Refuses requests addressed to any host but this loopback server, which blocks DNS rebinding. */
@@ -115,18 +119,18 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     await session.transport.handleRequest(req, res);
     return;
   }
-  const server = createServer();
+  const { server, closeGrants } = createServer();
   const transport = new NodeStreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
     enableDnsRebindingProtection: true,
     allowedHosts: localHosts,
     onsessioninitialized: (id) => {
-      sessions.set(id, { transport, server, lastSeen: Date.now() });
+      sessions.set(id, { transport, server, closeGrants, lastSeen: Date.now() });
     },
   });
-  transport.onclose = () => {
+  server.server.onclose = () => {
     if (transport.sessionId) sessions.delete(transport.sessionId);
-    server.close().catch(() => {});
+    void closeGrants();
   };
   await server.connect(transport);
   try {
@@ -155,5 +159,5 @@ async function startHttp() {
 if (process.argv.includes("--http")) {
   await startHttp();
 } else {
-  await createServer().connect(new StdioServerTransport());
+  await createServer().server.connect(new StdioServerTransport());
 }

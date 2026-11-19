@@ -107,3 +107,10 @@ test('ACK carries the viewer wait as saturating big-endian microseconds', () => 
   assert.deepEqual(bytes(NaN), [0, 0, 0, 4, 0, 0, 0, 0]);
   assert.deepEqual(Array.from(encodeAck(1, 7)).slice(16), [0, 0, 0, 0]);
 });
+
+test('a clipboard notice is an empty type 7 message', () => {
+  assert.deepEqual(parseMessage(header(7, 3, 0, 0)), { type: 'clipboard', generation: 3 });
+  assert.throws(() => parseMessage(header(7, 3, 1, 0)), { reason: 'protocol_error' });
+  assert.throws(() => parseMessage(header(7, 3, 0, 1)), { reason: 'protocol_error' });
+  assert.throws(() => parseMessage(header(7, 3, 0, 0).map((byte, index) => index === 5 ? 8 : byte)), { reason: 'protocol_error' });
+});

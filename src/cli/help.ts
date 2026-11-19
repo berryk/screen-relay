@@ -118,7 +118,7 @@ export function helpDocument(name = ''): Record<string, unknown> {
     notes: command?.notes ?? [],
     resultSchema: command?.resultSchema ?? {},
     ...(command ? { runsOn: command.runsOn } : {}),
-    ...(command?.subcommands ? { subcommands: command.subcommands.map((subcommand) => ({ name: subcommand.name, summary: subcommand.summary, examples: subcommand.examples })) } : {}),
+    ...(command?.subcommands ? { subcommands: command.subcommands.map(({ name, summary, examples, resultSchema }) => ({ name, summary, examples, ...(resultSchema ? { resultSchema } : {}) })) } : {}),
     ...(!name ? { commands: Object.entries(commands).map(([key, entry]) => ({ name: key, summary: entry.summary, group: entry.group, runsOn: entry.runsOn })) } : {}),
   };
 }

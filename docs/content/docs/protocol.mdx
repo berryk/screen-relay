@@ -38,6 +38,19 @@ Replace the URL and securely copy the session token into `./token`. For a local 
 
 `POST /input` takes binary records. To write your own client, see the [wire protocol](https://github.com/vercel-labs/screen-relay/blob/main/PROTOCOL.md).
 
+## Read and set the clipboard
+
+`GET /clipboard` returns the desktop's clipboard text as `{"text":"…"}`, and an empty string when the clipboard holds no text. `POST /clipboard` replaces it with the request body, read as UTF-8 text:
+
+```sh
+curl -fsS http://127.0.0.1:8080/clipboard
+curl -fsS --data-binary 'Hello from the API' http://127.0.0.1:8080/clipboard
+```
+
+A write returns `{"length":N}`, the number of bytes set, and an empty body clears the clipboard. The clipboard works while another client owns input, like a screenshot. Text is limited to 256 KiB and cannot contain NUL characters. To paste the text into an app, send the paste keys afterward, such as `screen-relay key ctrl+v`.
+
+`capabilities.clipboard` is `true` when the desktop has a clipboard the engine can use. On Wayland, the compositor must support the wlr-data-control protocol, which sway and labwc do.
+
 ## Endpoints
 
 | Method | Path | What it does |
@@ -45,20 +58,24 @@ Replace the URL and securely copy the session token into `./token`. For a local 
 | `GET` | <span id="get-capabilities" />`/capabilities` | Returns the desktop size, backend, features, and input limits as JSON. |
 | `GET` | `/screenshot.png` | Returns a PNG without the cursor, even when another client owns input; maximum 8 MiB and a 5-second timeout. |
 | `POST` | <span id="post-input" />`/input` | Sends a batch of binary input records. |
+| `GET`, `POST` | <span id="clipboard" />`/clipboard` | Reads or replaces the clipboard text. |
 | `GET` | <span id="get-metrics" />`/metrics` | Returns stream and resource metrics as JSON. |
-| `POST` | <span id="post-tickets" />`/tickets` | Returns a one-time viewer ticket that opens one WebSocket within 60 seconds. |
+| `POST` | <span id="post-grants" />`/grants/watch`, `/grants/control` | Creates a [grant](/docs/remote-access#grants): a credential that opens only view-only streams, or only streams and `/control`. Add `?ttl=SECONDS`, up to 3600, which is also the default. Returns `id`, `token`, `expires_in`, and `scope` as JSON. |
+| `DELETE` | <span id="delete-grants" />`/grants/ID` | Revokes the grant with that `id` and closes the connections opened with it. Returns 200. |
 | `GET` | `/`, `/index.html`, `/viewer.js` | Serves the viewer. |
-| WebSocket | `/stream` | Streams video, sends cursor images when supported, and accepts viewer input. Add `?view=1` to watch without owning input. |
-| WebSocket | `/control` | Sends input and receives a response for each event, without video. |
+| WebSocket | `/stream` | Streams video and cursor images when supported. With no query parameter, it claims idle input. Use `?view=1` to watch without input or `?take=1` to take input from the current owner, which closes with code 4001. Add `clipboard=1` to a claiming or takeover stream to receive clipboard notices. |
+| WebSocket | `/control` | Sends input and receives a response for each event, without video. It can run next to a view-only `/stream`, and closes with code 4001 when a viewer takes control or code 4003 when it connects while input is owned. |
 
 The viewer HTML is served with `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so another site cannot embed it and forward clicks to the desktop.
+
+The engine sends no CORS headers. A browser page on another origin can open a WebSocket when its origin is allowed, but the browser blocks its HTTP requests, including `/capabilities`, `/metrics`, and `/screenshot.png`. See [Embedded viewers and CORS](/docs/remote-access#embedded-viewers-and-cors).
 
 ## Authentication
 
 - When the session has a token, send `Authorization: Bearer TOKEN`. Do not put the token in a request URL. See [Tokens](/docs/remote-access#tokens).
-- A custom client's WebSocket can offer the `ticket.TICKET` subprotocol from `POST /tickets` instead of the token. Each ticket works once. The bundled viewer still uses the token.
-- The `Host` must be `localhost`, `127.0.0.1`, or the authority configured with `--public`, with its port if specified.
-- `Origin` is optional. When the session has a token, any `Origin` is accepted. Without a token, a sent `Origin` must be a loopback origin with a loopback `Host`.
+- A WebSocket can send a grant's `token` in place of the session token. A watch grant opens `/stream?view=1`. A control grant opens `/stream`, `/stream?take=1`, `/stream?view=1`, and `/control`. Neither opens a URL with `clipboard=1`, and neither authorizes an HTTP request. See [Grants](/docs/remote-access#grants).
+- The `Host` must be `localhost`, `127.0.0.1`, or the authority configured with `--public`, with its port if specified. For the `--public` authority, an uppercase host name and port 443 are normalized before the comparison.
+- `Origin` is optional. Requests without it still need an accepted `Host` and any required token. If present, `Origin` must match the configured `--public` origin, an entry in `--allow-origin`, or a loopback origin whose host and port match the loopback `Host` header. Without `--public`, loopback origins on other ports are also accepted. Other values, including `null`, are rejected. See [Browser origins](/docs/remote-access#browser-origins) for accepted formats and browser HTTP limits.
 
 ## Errors
 
@@ -67,15 +84,19 @@ The viewer HTML is served with `Content-Security-Policy: frame-ancestors 'none'`
 | Status | What to do |
 | --- | --- |
 | 400 `invalid_input` | Send a nonempty batch of valid records with the correct `Content-Length`. |
+| 400 `invalid_text` | Send clipboard text as UTF-8 without NUL characters. |
 | 401 `unauthorized` | Send the correct session token. |
-| 403 `forbidden` | Check the `Host` and `Origin` rules. |
+| 403 `forbidden` | Check the `Host` and `Origin` rules under [Authentication](#authentication). |
 | 404 `not_found` | Check the endpoint path. |
 | 405 `method_not_allowed` | Use the method listed for the endpoint. |
 | 409 `busy` | Close the input owner or wait, then check for partial input before retrying. A viewer that owns input is one owner; a view-only viewer is not. |
-| 411 `length_required` | Include `Content-Length` on `POST /input`. |
-| 413 `too_large` | Send no more than 256 input records per request. |
+| 411 `length_required` | Include `Content-Length` on `POST /input` and `POST /clipboard`. |
+| 413 `too_large` | Send no more than 256 input records per request or 256 KiB of clipboard text. |
+| 413 `clipboard_too_large` | The clipboard holds more than the 256 KiB read limit. |
 | 422 `unsupported_input` | Change the input or keyboard layout. |
-| 503 `busy` | Wait for the other screenshot to finish. |
+| 503 `busy` | Wait for the other screenshot request to finish. |
+| 503 `clipboard_busy` | Wait for the clipboard request queue to drain, then retry. |
+| 503 `clipboard_unavailable` | The desktop has no clipboard the engine can use, or the app that owns the clipboard did not answer within 2 seconds. Check `capabilities.clipboard`. |
 | 503 `screenshot_unavailable` | Check `screen-relay logs engine` and try again. |
 
 Errors are JSON with an `error` field.

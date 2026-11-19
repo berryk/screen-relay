@@ -42,7 +42,7 @@ BACKEND_OBJCXXFLAGS = $(if $(filter %.mm,$(BACKEND_SRCS)),-fobjc-arc)
 ENGINE_SRCS = $(CORE_SRCS) $(wildcard src/engine/server/*.cpp) $(BACKEND_SRCS)
 HEADERS = $(wildcard src/engine/*/*.hpp src/engine/backends/linux/*.hpp) $(foreach dir,$(BACKEND_DIRS),$(wildcard src/engine/backends/$(dir)/*.hpp))
 
-WAYLAND_PROTOCOLS = wlr-screencopy-unstable-v1 wlr-virtual-pointer-unstable-v1 virtual-keyboard-unstable-v1
+WAYLAND_PROTOCOLS = wlr-data-control-unstable-v1 wlr-screencopy-unstable-v1 wlr-virtual-pointer-unstable-v1 virtual-keyboard-unstable-v1
 .PHONY: all deps install test test-color test-flow test-capture-bucket test-cpu-budget test-input test-backend test-server test-keymap test-macos-keys clean FORCE
 all: relay-engine
 
@@ -131,7 +131,7 @@ build/backend-source-test: tests/unit/backend-source-test.cpp $(CORE_SRCS) $(wil
 test-backend: build/backend-source-test
 	./build/backend-source-test
 
-SERVER_TEST_SRCS = src/engine/server/config.cpp src/engine/server/metrics.cpp src/engine/server/wire.cpp src/engine/server/backend.cpp src/engine/core/input.cpp src/engine/core/wait.cpp $(BACKEND_SRCS)
+SERVER_TEST_SRCS = src/engine/server/clipboard.cpp src/engine/server/config.cpp src/engine/server/metrics.cpp src/engine/server/wire.cpp src/engine/server/backend.cpp src/engine/core/input.cpp src/engine/core/wait.cpp $(BACKEND_SRCS)
 
 build/test-viewer/viewer.js:
 	mkdir -p build/test-viewer

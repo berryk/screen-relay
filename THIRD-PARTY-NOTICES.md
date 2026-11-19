@@ -62,6 +62,7 @@ SOFTWARE.
 The files in `src/engine/backends/linux/wayland/protocols/` are licensed under the MIT license. Each file carries its copyright and permission notice.
 
 - `virtual-keyboard-unstable-v1.xml`: Copyright 2008-2011 Kristian Høgsberg; 2010-2013 Intel Corporation; 2012-2013 Collabora, Ltd.; 2018 Purism SPC
+- `wlr-data-control-unstable-v1.xml`: Copyright 2018 Simon Ser; 2019 Ivan Molodetskikh
 - `wlr-screencopy-unstable-v1.xml`: Copyright 2018 Simon Ser; 2019 Andri Yngvason
 - `wlr-virtual-pointer-unstable-v1.xml`: Copyright 2019 Josef Gajdusek
 

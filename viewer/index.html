@@ -58,6 +58,7 @@ button:focus-visible,input:focus-visible{outline:2px solid #3b82f6;outline-offse
       <button type="button" data-action="scale" aria-expanded="false" aria-controls="scale-panel" aria-label="Scaling" title="Scaling"><svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
       <button type="button" data-action="keys" aria-expanded="false" aria-controls="keys-panel" aria-label="Send keys" title="Send keys"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
       <button type="button" data-action="screenshot" aria-label="Save screenshot" title="Save screenshot"><svg viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/></svg></button>
+      <button type="button" data-action="clipboard" aria-expanded="false" aria-controls="clipboard-panel" aria-label="Clipboard" title="Clipboard" hidden><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
       <button type="button" data-action="control" aria-pressed="false" aria-label="Take control" title="Take control"><svg viewBox="0 0 24 24"><path d="M8 13V6a1.5 1.5 0 0 1 3 0v6M11 12V4.5a1.5 1.5 0 0 1 3 0V12M14 12V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-1.5A5.5 5.5 0 0 1 4 14.5V12"/></svg></button>
       <button type="button" data-action="stats" aria-pressed="false" aria-label="Stream statistics" title="Stream statistics"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
       <button type="button" data-action="connection" aria-expanded="false" aria-controls="connection-panel" aria-label="Connection" title="Connection"><svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg></button>
@@ -79,6 +80,10 @@ button:focus-visible,input:focus-visible{outline:2px solid #3b82f6;outline-offse
     <button type="button" data-keys="PrintScreen">Print Screen</button>
     <button type="button" data-keys="MetaLeft+KeyD">Super+D</button>
     <button type="button" id="meta-ctrl" aria-pressed="false" title="Use ⌘ as Ctrl">Use ⌘ as Ctrl</button>
+  </div>
+  <div id="clipboard-panel" class="panel" role="group" aria-label="Clipboard" hidden>
+    <button type="button" data-clipboard="pull" title="Put the remote clipboard text on this computer's clipboard">Copy from remote</button>
+    <button type="button" data-clipboard="push" title="Put this computer's clipboard text on the remote clipboard">Send to remote</button>
   </div>
   <div id="scale-panel" class="panel" role="group" aria-label="Scaling" hidden>
     <button type="button" data-scale="fit" aria-pressed="true">Fit</button>

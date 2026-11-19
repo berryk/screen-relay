@@ -100,6 +100,7 @@ For a 1920x1080 screenshot, pixel `480,810` is `screen-relay click 0.25 0.75`, a
 
 - `screen-relay type <text>` sends layout-neutral text events, one per Unicode scalar value. The remote keyboard layout decides each character, so accents, symbols and non-US layouts work. Use it for text.
 - `screen-relay key <combo>...` sends physical key combinations, in order, such as `ctrl+l`, `alt+Tab`, `cmd+shift+t` and `Enter`. Use it for shortcuts, arrows, function keys and Escape. Modifiers are `ctrl`, `shift`, `alt` and `super`. `cmd`, `meta` and `win` alias `super`.
+- To enter a long text, or text the layout cannot type, put it on the clipboard and paste it: `screen-relay clipboard set --stdin < file.txt`, then `screen-relay key ctrl+v` (`super+v` on macOS). To read text an app copied, run `screen-relay clipboard get`.
 - A long `type` is sent in batches of at most 256 events. On failure, `data.applied` is the number of events the engine confirmed.
   - If the engine answered (`busy`, `invalid_input`, `unsupported_input`), resend only the rest of the text.
   - If the reply was lost (`timeout`, `unreachable`, `disconnected`), the last batch may already be on screen. Take a screenshot before you resend anything.
@@ -128,7 +129,7 @@ Exit codes: [CLI exit codes](references/cli.md#exit-codes).
 | --- | --- | --- |
 | `busy` | Another controller holds input, or a screenshot is already running. | See [One controller](#one-controller). Screenshots still work. |
 | `unauthorized` | Missing or wrong token. | Pass `--token-file FILE` or set `SCREEN_RELAY_TOKEN_FILE`. Or open the `#token=` viewer link. |
-| `forbidden` | The engine rejected `Host` or `Origin`. | Use the `--public` URL or loopback. |
+| `forbidden` | The engine rejected `Host` or `Origin`. | Use the `--public` URL or a loopback page whose origin matches the address it connects to. For a browser page on another origin, restart with `--allow-origin`. |
 | `unreachable` | Cannot connect: `Connection refused.`, `The host name did not resolve.` or `The TLS certificate was rejected.` | Check the address, then `screen-relay status --url <URL>`. |
 | `timeout` | No reply within `--timeout`, or `up` was not ready in time. | Raise `--timeout`. For `up`, read the component log. |
 | `not_running` | No session or logs with that name. | `screen-relay up -d`. |
@@ -140,6 +141,7 @@ Exit codes: [CLI exit codes](references/cli.md#exit-codes).
 | `missing_command` | `run` was given no app (exit 2). | `screen-relay run -- APP`. |
 | `spawn_failed` | `run` could not start the app. | Check the app name and `screen-relay logs apps`. |
 | `unsupported_input` | The backend cannot produce a character or apply the input. | Use `screen-relay type` for layout-neutral text. |
+| `clipboard_unavailable` | The desktop has no clipboard the engine can use, or the app that owns it did not answer. | Use `screen-relay type` instead. `status --json` shows `capabilities.clipboard`. |
 | `unsupported_platform` | `up`, `down` or `run` ran on a platform other than Linux, macOS or Windows. | Run host commands on the Linux, macOS or Windows machine that shows the desktop. |
 | `invalid_config` | A config key or value is invalid. The message names the file and key. | Fix the file and start again. |
 | `invalid_input`, `invalid_option`, `unknown_command` | Usage error (exit 2). | Read the `next` command, usually `screen-relay help <command>`. |
@@ -147,7 +149,9 @@ Exit codes: [CLI exit codes](references/cli.md#exit-codes).
 
 ## One controller
 
-Only one controller sends input at a time: a browser viewer that took control, an SDK control session, or your CLI. A viewer opens view-only, so it can watch while your CLI sends input. A second controller gets `busy` with the message `Another controller holds control of the desktop.`, and nothing is applied. Screenshots, `status` and `capabilities` keep working. Do not retry in a loop. Wait for the other controller to release control or close, then retry once.
+Only one controller sends input at a time. A viewer claims idle input when it opens. If you hold an SDK control session, the viewer opens view-only. Choose **Release control** in a viewer that owns input before sending input with the CLI. A second controller gets `busy` with the message `Another controller holds control of the desktop.`, and nothing is applied. Screenshots, `status` and `capabilities` keep working. Do not retry in a loop. Wait for the other controller to release control or close, then retry once.
+
+A person can open the viewer while you hold an SDK control session, and choose **Take control** at any time. Pending and future input and future `session.screenshot()` calls fail with `control_taken`. `session.capabilities()` and `session.status()` still use HTTP. Connect again only after the person releases control.
 
 ## Config
 

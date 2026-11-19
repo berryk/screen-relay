@@ -142,17 +142,24 @@ std::string header(lws* wsi, lws_token_indexes token) {
   const int count = lws_hdr_copy(wsi, value, sizeof(value), token);
   return count > 0 ? std::string(value, size_t(count)) : "";
 }
-bool authenticated(const Config& config, lws* wsi, bool websocket) {
-  if (config.token.empty()) return true;
-  if (!websocket) return secretEqual(header(wsi, WSI_TOKEN_HTTP_AUTHORIZATION), "Bearer " + config.token);
+std::string websocketBearer(lws* wsi) {
   std::istringstream protocols(header(wsi, WSI_TOKEN_PROTOCOL));
-  std::string protocol;
+  std::string protocol, bearer;
   while (std::getline(protocols, protocol, ',')) {
     const auto first = protocol.find_first_not_of(" \t");
     const auto last = protocol.find_last_not_of(" \t");
-    if (first != std::string::npos && secretEqual(protocol.substr(first, last-first+1), "bearer." + config.token)) return true;
+    if (first == std::string::npos) continue;
+    protocol = protocol.substr(first, last-first+1);
+    if (protocol.rfind("bearer.", 0) != 0) continue;
+    if (!bearer.empty() || protocol.size() != 71) return {};
+    bearer = protocol.substr(7);
   }
-  return false;
+  return bearer;
+}
+bool authenticated(const Config& config, lws* wsi, bool websocket) {
+  if (config.token.empty()) return true;
+  if (websocket) return secretEqual(websocketBearer(wsi), config.token);
+  return secretEqual(header(wsi, WSI_TOKEN_HTTP_AUTHORIZATION), "Bearer " + config.token);
 }
 bool secureRandom(unsigned char* out, size_t size) {
 #ifdef _WIN32
@@ -165,35 +172,26 @@ bool secureRandom(unsigned char* out, size_t size) {
   return true;
 #endif
 }
-void Tickets::expire(Clock::time_point now) {
-  waiting.erase(std::remove_if(waiting.begin(), waiting.end(),
-                               [now](const auto& entry) { return now >= entry.second; }),
-                waiting.end());
+uint64_t Grants::issue(std::string token, GrantScope scope, Clock::time_point now, uint64_t ttl) {
+  grants.erase(std::remove_if(grants.begin(), grants.end(), [now](const auto& grant) { return now >= grant.expires; }), grants.end());
+  if (grants.size() >= capacity || last_id == UINT64_MAX || !ttl || ttl > max_ttl || token.empty() || find(token, now)) return 0;
+  const auto id = ++last_id;
+  grants.push_back({id, std::move(token), scope, now + std::chrono::seconds(ttl)});
+  return id;
 }
-void Tickets::add(const std::string& ticket, Clock::time_point now) {
-  expire(now);
-  if (waiting.size() >= capacity) waiting.erase(waiting.begin());
-  waiting.emplace_back(ticket, now + lifetime);
+const Grants::Grant* Grants::find(const std::string& token, Clock::time_point now) const {
+  if (token.empty()) return nullptr;
+  for (const auto& grant : grants) if (now < grant.expires && secretEqual(token, grant.token)) return &grant;
+  return nullptr;
 }
-bool Tickets::redeem(const std::string& ticket, Clock::time_point now) {
-  expire(now);
-  if (ticket.empty()) return false;
-  for (auto entry = waiting.begin(); entry != waiting.end(); ++entry) {
-    if (secretEqual(entry->first, ticket)) { waiting.erase(entry); return true; }
-  }
-  return false;
+bool Grants::active(uint64_t id, Clock::time_point now) const {
+  return std::any_of(grants.begin(), grants.end(), [id, now](const auto& grant) { return id == grant.id && now < grant.expires; });
 }
-std::string offeredTicket(lws* wsi) {
-  std::istringstream protocols(header(wsi, WSI_TOKEN_PROTOCOL));
-  std::string protocol;
-  while (std::getline(protocols, protocol, ',')) {
-    const auto first = protocol.find_first_not_of(" \t");
-    const auto last = protocol.find_last_not_of(" \t");
-    if (first == std::string::npos) continue;
-    protocol = protocol.substr(first, last-first+1);
-    if (protocol.rfind("ticket.", 0) == 0) return protocol.substr(7);
-  }
-  return "";
+bool Grants::revoke(uint64_t id) {
+  const auto entry = std::find_if(grants.begin(), grants.end(), [id](const auto& grant) { return grant.id == id; });
+  if (entry == grants.end()) return false;
+  grants.erase(entry);
+  return true;
 }
 bool loopbackOrigin(const std::string& origin) {
   const auto scheme = origin.find("://");
@@ -210,11 +208,61 @@ bool loopbackOrigin(const std::string& origin) {
   return value > 0 && value <= 65535;
 }
 bool loopbackHost(const std::string& host) { return loopbackOrigin("http://" + host); }
+bool exactHttpsOrigin(const std::string& origin) {
+  if (origin.rfind("https://", 0) != 0) return false;
+  const auto authority = origin.substr(8);
+  const auto colon = authority.find(':');
+  const auto name = authority.substr(0, colon);
+  if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") != std::string::npos ||
+      name.front() == '.' || name.front() == '-' || name.back() == '.' || name.back() == '-') return false;
+  if (colon == std::string::npos) return true;
+  const auto text = authority.substr(colon + 1);
+  uint64_t port = 0;
+  return text.size() <= 5 && unsignedNumber(text, port) && text.front() != '0' && port <= 65535 && port != 443;
+}
+bool exactLoopbackHttpOrigin(const std::string& origin) {
+  if (origin.rfind("http://", 0) != 0) return false;
+  const auto authority = origin.substr(7);
+  const auto colon = authority.find(':');
+  const auto name = authority.substr(0, colon);
+  if (name != "localhost" && name != "127.0.0.1") return false;
+  if (colon == std::string::npos) return true;
+  const auto text = authority.substr(colon + 1);
+  uint64_t port = 0;
+  return text.size() <= 5 && unsignedNumber(text, port) && text.front() != '0' && port <= 65535 && port != 80;
+}
+bool exactAllowedOrigin(const std::string& origin) {
+  return exactHttpsOrigin(origin) || exactLoopbackHttpOrigin(origin);
+}
+static std::string httpsAuthority(const std::string& authority) {
+  if (authority.empty() || authority.find_first_of("/?#@\\ \t\r\n") != std::string::npos) return {};
+  auto separator = authority.find(':');
+  if (authority.front() == '[') {
+    const auto bracket = authority.find(']');
+    if (bracket == std::string::npos || bracket == 1) return {};
+    separator = bracket + 1;
+    if (separator == authority.size()) separator = std::string::npos;
+    else if (authority[separator] != ':') return {};
+  }
+  auto host = authority.substr(0, separator);
+  if (host.empty()) return {};
+  for (auto& c : host) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+  if (separator == std::string::npos) return host;
+  uint64_t port = 0;
+  if (!unsignedNumber(authority.substr(separator + 1), port) || !port || port > 65535) return {};
+  return port == 443 ? host : host + ':' + std::to_string(port);
+}
+bool originAllowed(const Config& config, const std::string& origin) {
+  if (std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) != config.allowed_origins.end()) return true;
+  return config.origin.empty() ? loopbackOrigin(origin) : origin == config.origin;
+}
 bool localRequest(const Config& config, lws* wsi) {
   const auto host = header(wsi, WSI_TOKEN_HOST);
-  if (!loopbackHost(host) && (config.origin.empty() || host != config.authority)) return false;
-  if (!config.token.empty() || lws_hdr_total_length(wsi, WSI_TOKEN_ORIGIN) <= 0) return true;
-  return loopbackHost(host) && loopbackOrigin(header(wsi, WSI_TOKEN_ORIGIN));
+  if (!loopbackHost(host) && (config.origin.empty() || httpsAuthority(host) != config.authority)) return false;
+  if (lws_hdr_total_length(wsi, WSI_TOKEN_ORIGIN) <= 0) return true;
+  const auto origin = header(wsi, WSI_TOKEN_ORIGIN);
+  return originAllowed(config, origin) ||
+         (loopbackHost(host) && loopbackOrigin(origin) && origin.substr(origin.find("://") + 3) == host);
 }
 bool unsignedNumber(const std::string& text, uint64_t& value) {
   if (text.empty()) return false;
@@ -236,12 +284,17 @@ bool parseConfig(int argc, char** argv, Config& config) {
       std::cout << "Usage: relay-engine [--bind ADDRESS] [--port PORT] [--viewer-dir DIR]\n"
                    "  [--backend NAME] [--output NAME] [--check]\n"
                    "  [--fps N] [--bitrate-min BPS] [--bitrate-start BPS] [--bitrate-max BPS]\n"
-                   "  [--token-file FILE [--public-origin https://HOST[:PORT]]]\n"
+                   "  [--token-file FILE [--public-origin https://HOST[:PORT]]\n"
+                   "    [--allow-origin ORIGIN[,...]]]\n"
                    "  [--tls-cert FILE --tls-key FILE | --behind-tls-proxy]\n"
                    "  [--insecure-local: unauthenticated, isolated development network only]\n"
                    "FPS is 10 to 120; bitrates are 250000 to 100000000 bits per second with\n"
                    "min <= start <= max. Non-loopback --bind needs --token-file;\n"
                    "--public-origin also needs TLS or --behind-tls-proxy.\n"
+                   "A browser request must come from the public origin, or from a loopback origin\n"
+                   "when there is none, unless --allow-origin lists its exact origin. Each allowed\n"
+                   "origin is a lowercase https://HOST[:PORT] origin, or http://localhost[:PORT] or\n"
+                   "http://127.0.0.1[:PORT] for a page served on the machine itself.\n"
                    "--check initializes the backend and exits without starting capture or the server.\n"
                    "Attach to DISPLAY using the caller's XAUTHORITY. Defaults: 127.0.0.1:8080, 60 fps,\n"
                    "1000000/8000000/40000000 bps.\n"
@@ -270,9 +323,17 @@ bool parseConfig(int argc, char** argv, Config& config) {
     else if (option == "--bitrate-max") config.bitrate_max = bitrate(value);
     else if (option == "--viewer-dir") config.viewer = value;
     else if (option == "--public-origin") {
-      if (value.rfind("https://", 0) != 0 || value.size() <= 8 || value.find_first_of("/?#@\\ \t\r\n", 8) != std::string::npos)
-        throw std::runtime_error("Public origin must be an HTTPS origin without path or credentials");
-      config.origin = value; config.authority = value.substr(8);
+      config.authority = value.rfind("https://", 0) == 0 ? httpsAuthority(value.substr(8)) : std::string{};
+      if (config.authority.empty()) throw std::runtime_error("Public origin must be an HTTPS origin without path or credentials");
+      config.origin = "https://" + config.authority;
+    } else if (option == "--allow-origin") {
+      std::istringstream origins(value + ',');
+      std::string origin;
+      while (std::getline(origins, origin, ',')) {
+        if (!exactAllowedOrigin(origin) || config.allowed_origins.size() == 16)
+          throw std::runtime_error("Allowed origins must be at most 16 comma-separated lowercase https://HOST[:PORT] origins, or http://localhost[:PORT] or http://127.0.0.1[:PORT] ones, without a path, wildcard or default port");
+        config.allowed_origins.push_back(origin);
+      }
     } else if (option == "--token-file") {
       if (!privateTokenFile(value))
         throw std::runtime_error("Token file must be private, owned by this user and contain 64 hexadecimal characters");
@@ -289,6 +350,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
   if (config.bitrate_min > config.bitrate_start || config.bitrate_start > config.bitrate_max)
     throw std::runtime_error("Bitrates must satisfy min <= start <= max");
   if (!config.origin.empty() && config.token.empty()) throw std::runtime_error("Public origin requires a token");
+  if (!config.allowed_origins.empty() && config.token.empty()) throw std::runtime_error("Allowed origins require a token");
   if (config.insecure_local && (!config.token.empty() || !config.origin.empty() || !config.cert.empty() || config.proxy))
     throw std::runtime_error("--insecure-local cannot be combined with remote access options");
   if (config.bind != "127.0.0.1" && !config.insecure_local && (config.token.empty() || (!config.origin.empty() && config.cert.empty() && !config.proxy)))

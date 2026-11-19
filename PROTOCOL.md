@@ -37,14 +37,45 @@ The server processes records in order and stops at the first record rejected dur
 | --- | --- |
 | `/stream` | Receives video and, when supported, cursor messages. Sends ACKs and input. |
 | `/stream?view=1` | Receives the same messages, but does not own input. |
+| `/stream?take=1` | Works like `/stream`, and takes input from the current owner. |
+| `/stream?clipboard=1` | Works like `/stream` and also receives a clipboard notice when the desktop clipboard changes. |
+| `/stream?take=1&clipboard=1` | Works like `/stream?take=1` and also receives clipboard notices. The bundled viewer uses it when it takes control. |
 | `/control` | Receives a control-ready message, then sends input and receives one response per request. Up to 32 replies can be queued. |
-| Both | Use the `nsl1` subprotocol and binary messages. One WebSocket message contains one protocol message. Only one `/stream` or `/control` connection is allowed. A `/stream` connection without `?view=1`, or a `/control` connection, owns input and blocks `POST /input`. |
+| All | Use the `nsl1` subprotocol and binary messages. One WebSocket message contains one protocol message. A `/stream` connection without `?view=1`, or a `/control` connection, owns input and blocks `POST /input`. |
 
-A `/stream?view=1` connection watches without owning input, so `POST /input` and the CLI keep working while it is connected. The server ignores input messages sent on it. To take input, close the connection and open `/stream` without the parameter.
+A `/stream?view=1` connection watches without owning input, so `POST /input` and the CLI keep working while it is connected. The server ignores input messages sent on it. To take input, close the connection and open `/stream?take=1`.
+
+The engine admits up to four `/stream` connections, with one input owner at a time.
+
+| Connection | Result |
+| --- | --- |
+| `/stream?view=1` | Opens if a viewer slot is available. No change to input ownership. |
+| `/stream` | Opens and owns input if a viewer slot is available and input has no owner. |
+| `/stream?take=1` | Opens and owns input if a viewer slot is available or the current owner is a viewer it can replace. The previous input owner closes with code 4001 and reason `taken`. |
+| `/control` | Opens and owns input if input has no owner. Otherwise it opens and closes with code 4003 and reason `busy`. |
+
+Adding `clipboard=1` to a supported stream URL does not change these rules. A refused `/stream` connection fails its WebSocket handshake, while a refused `/control` connection opens and closes with code 4003 and reason `busy` so a client can tell it apart from an unreachable engine. Held keys and buttons are released when a connection loses input. A browser that loses input to a takeover reconnects with `?view=1`.
 
 When the session has a token, offer both `nsl1` and `bearer.TOKEN` as subprotocols; the server selects `nsl1`. Do not put the token in a request URL.
 
-To let a viewer connect without giving it the token, send `POST /tickets` with the token as `Authorization: Bearer TOKEN`. The response is `{"ticket":"…","expires_in":60}`. The viewer offers `nsl1` and `ticket.TICKET` instead of `bearer.TOKEN`. A ticket opens one WebSocket, within 60 seconds; a connection the server refuses for another reason, such as an existing viewer, doesn't use it. A ticket doesn't authorize HTTP requests. The bundled viewer doesn't use tickets yet, so only custom clients can offer `ticket.TICKET`. Up to 16 unused tickets are kept, and requesting another drops the oldest.
+### Grants
+
+A grant is a second credential with a narrower scope and a lifetime, for a viewer or client that should not hold the session token. Send `POST /grants/watch` or `POST /grants/control` with the session token as `Authorization: Bearer TOKEN`. Add `?ttl=SECONDS` to set the lifetime; the default and the maximum are 3600. The response is `{"id":"…","token":"…","expires_in":3600,"scope":"watch"}`. A client offers the grant's `token` as `bearer.TOKEN`, the same way as the session token.
+
+| Scope | WebSocket connections it opens |
+| --- | --- |
+| `watch` | `/stream?view=1` |
+| `control` | `/stream`, `/stream?take=1`, `/stream?view=1`, and `/control` |
+
+A grant never opens a URL with `clipboard=1`, and it does not authorize HTTP requests, so `/clipboard`, `/input`, `/screenshot.png`, `/capabilities`, `/metrics`, and `/grants` still need the session token. Grant connections share up to three browser slots. One of the four browser slots is reserved for a connection that uses the session token.
+
+A grant can open connections until it ends. It ends when its lifetime runs out, or when you send `DELETE /grants/ID` with the session token, which returns 200. The engine then closes the connections opened with that grant and refuses new ones. Connections opened with the session token or another grant stay open. The engine keeps at most 32 active grants in memory. A request to create a grant returns HTTP 503 `grant_limit` when that limit is reached, or HTTP 400 `invalid_ttl` when the requested lifetime is outside 1 to 3600 whole seconds. Stopping the session ends them all. A live connection closed because its grant ended receives WebSocket close code `1008` with reason `grant ended`.
+
+The bundled viewer accepts a grant in its link. `#token=GRANT_TOKEN&scope=watch` opens a watch grant: the viewer connects only to `/stream?view=1` and offers no way to take control. `#token=GRANT_TOKEN&scope=control` opens a control grant: the viewer connects to `/stream`, `/stream?take=1`, or `/stream?view=1` without `clipboard=1`. With either scope the viewer sends no HTTP request. A link with only `#token=` is treated as the session token.
+
+### Messages
+
+Every message starts with this 20-byte header.
 
 | Header offset | Size | Field |
 | ---: | ---: | --- |
@@ -64,6 +95,7 @@ To let a viewer connect without giving it the token, send `POST /tickets` with t
 | 4 | Server to `/control` | Desktop width and height, 2 bytes each. Sequence is zero. |
 | 5 | Server to `/control` | One status byte: 0 accepted, 1 invalid, 2 unsupported. Sequence echoes the request ID. A status of 0 does not report a later backend failure. |
 | 6 | Server to `/stream` | Width, height, hotspot X, and hotspot Y (2 bytes each), followed by straight-alpha RGBA pixels row by row. Sequence is zero. No ACK is needed. |
+| 7 | Server to a `/stream` opened with `clipboard=1` | Clipboard notice: the desktop clipboard changed, including changes from `POST /clipboard`. Empty payload, sequence zero, no ACK. Read the text with `GET /clipboard`. |
 
 | Rule | Detail |
 | --- | --- |
@@ -73,3 +105,4 @@ To let a viewer connect without giving it the token, send `POST /tickets` with t
 | Counters | Reconnect when the frame sequence reaches 4294967295. If the generation reaches that value, restart the session before connecting again. |
 | Cursor | At most 256 by 256 pixels, with the hotspot inside the image. Eight zero bytes restore the local arrow; a transparent image hides the cursor. The cursor does not follow pointer jumps made by the desktop. |
 | Disconnect | Held input is released. Reconnecting does not replay requests. |
+| Clipboard | Only a `/stream` opened with `clipboard=1` receives type 7, so a client that rejects unknown types keeps working. Several changes close together can arrive as one notice, and one change can arrive as more than one. |

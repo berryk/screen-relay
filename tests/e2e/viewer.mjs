@@ -136,8 +136,25 @@ try {
   assert.equal(view.width, 1920, `the canvas is ${view.width} pixels wide, expected 1920`);
   assert.equal(view.height, 1080, `the canvas is ${view.height} pixels high, expected 1080`);
   console.log(`viewer live: ${view.drawn} frames drawn, ${view.width}x${view.height}`);
-  assert.equal(view.status, 'Live · view only', `the viewer status is "${view.status}"`);
-  assert.equal(view.control, 'false', 'the viewer took control without being asked');
+  assert.equal(view.status, 'Live · you have control', `the viewer status is "${view.status}"`);
+  assert.equal(view.control, 'true', 'the first viewer did not claim idle input');
+
+  const watcher = new WebSocket(`ws://127.0.0.1:${port}/stream?view=1`, ['nsl1', `bearer.${relay.token}`]);
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the second viewer received no video')), 10000);
+      watcher.addEventListener('message', () => { clearTimeout(timer); resolve(); }, { once: true });
+      watcher.addEventListener('error', () => { clearTimeout(timer); reject(new Error('the second viewer could not connect')); }, { once: true });
+    });
+    assert.equal(viewer().status, 'Live · you have control');
+  } finally {
+    watcher.close();
+  }
+
+  browser(['click', '#toolbar-toggle']);
+  browser(['click', '[data-action="control"]']);
+  await poll(() => viewer(), (view) => view.status === 'Live · view only' && view.control === 'false', 15000,
+    'the first viewer did not release control');
 
   const box = evalJs(`(() => {
     const rect = document.querySelector('#screen').getBoundingClientRect();
@@ -197,7 +214,6 @@ try {
   );
   console.log('CLI click and type worked while the viewer watched');
 
-  browser(['click', '#toolbar-toggle']);
   browser(['click', '[data-action="control"]']);
   await poll(
     () => viewer(),

@@ -290,3 +290,72 @@ test('remote credentials require HTTPS and are not forwarded through redirects',
     await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => target.close(resolve))]);
   }
 });
+
+test('a refused control connection reports busy', async () => {
+  const original = globalThis.WebSocket;
+  class RefusedSocket extends EventTarget {
+    static CLOSING = 2;
+    constructor() { super(); this.readyState = 1; queueMicrotask(() => { this.readyState = 3; this.dispatchEvent(Object.assign(new Event('close'), { code: 4003 })); }); }
+    close() { this.readyState = 3; }
+    send() {}
+  }
+  globalThis.WebSocket = RefusedSocket;
+  try {
+    await assert.rejects(connect(), { code: 'BUSY', reason: 'busy' });
+  } finally { globalThis.WebSocket = original; }
+});
+
+test('takeover ends session input and screenshots but leaves HTTP status and capabilities available', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(['/capabilities', '/metrics'].includes(request.url) ? 200 : 404, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ path: request.url }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const original = globalThis.WebSocket; globalThis.WebSocket = FakeSocket;
+  try {
+    const session = await connect({ url: `http://127.0.0.1:${server.address().port}` });
+    const pending = session.input({ type: 'releaseAll' });
+    FakeSocket.current.readyState = 3;
+    FakeSocket.current.dispatchEvent(Object.assign(new Event('close'), { code: 4001 }));
+    await assert.rejects(pending, { reason: 'control_taken' });
+    await assert.rejects(session.input({ type: 'releaseAll' }), { reason: 'control_taken' });
+    await assert.rejects(session.screenshot(), { reason: 'control_taken' });
+    assert.deepEqual(await session.capabilities(), { path: '/capabilities' });
+    assert.deepEqual(await session.status(), { path: '/metrics' });
+  } finally {
+    globalThis.WebSocket = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('clipboard text round-trips as UTF-8 and engine refusals keep their reasons', async () => {
+  let stored = '', error;
+  const server = createServer(async (request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (error) { response.writeHead(503); return response.end(JSON.stringify({ error })); }
+    if (request.method === 'GET') return response.end(JSON.stringify({ text: stored }));
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    stored = Buffer.concat(chunks).toString('utf8');
+    response.end(JSON.stringify({ length: Buffer.concat(chunks).length }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const client = createClient({ url: `http://127.0.0.1:${server.address().port}` });
+    await client.setClipboard('naïve ✓ 🚀\nline');
+    assert.equal(await client.clipboard(), 'naïve ✓ 🚀\nline');
+    await client.setClipboard('');
+    assert.equal(await client.clipboard(), '');
+    await assert.rejects(client.setClipboard('a\0b'), { reason: 'invalid_input' });
+    await assert.rejects(client.setClipboard('é'.repeat(131073)), { reason: 'invalid_input' });
+    error = 'clipboard_unavailable';
+    await assert.rejects(client.clipboard(), { reason: 'clipboard_unavailable' });
+    error = 'clipboard_busy';
+    await assert.rejects(client.clipboard(), { reason: 'busy', hint: 'Wait briefly, then retry.' });
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});

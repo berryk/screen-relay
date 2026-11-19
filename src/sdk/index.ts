@@ -4,7 +4,7 @@ import { request as httpsRequest, type RequestOptions } from 'node:https';
 import { plan, type Plan } from './transport.js';
 import {
   RelayError, networkError, responseError, baseUrl, integer, encodeInput, encodeInputBatch, comboEvents, textEvents,
-  batches, parseMessage, socketTarget, MAX_INPUT_BATCH, MAX_INPUT_PENDING,
+  batches, parseMessage, socketTarget, CLOSE_TAKEN, CLOSE_BUSY, MAX_CLIPBOARD_BYTES, MAX_INPUT_BATCH, MAX_INPUT_PENDING,
   type InputEvent,
 } from '../protocol/index.js';
 
@@ -21,8 +21,9 @@ export interface Capabilities {
   version: number; backend: string; width: number; height: number; fps: number;
   input: { keyboard: boolean; pointer: boolean; buttons: boolean; wheel: boolean };
   screenshot: string; control: string; wayland: boolean; max_input_pending: number;
-  input_endpoint: string; max_input_batch: number; tickets: string;
+  input_endpoint: string; max_input_batch: number;
   cursor: boolean; audio: boolean; clipboard: boolean; resize: boolean; ime: boolean;
+  clipboard_endpoint?: string; max_clipboard_bytes?: number;
 }
 /** Sends each call as its own request. Coordinates are fractions of the screen from 0 to 1, and `screenshot` resolves to PNG bytes. */
 export interface Client {
@@ -35,8 +36,12 @@ export interface Client {
   key(...combos: string[]): Promise<InputResult>;
   type(text: string): Promise<InputResult>;
   input(events: InputEvent[]): Promise<InputResult>;
+  /** Reads the desktop clipboard as text; an empty string when it holds no text. */
+  clipboard(): Promise<string>;
+  /** Replaces the desktop clipboard with text of up to 256 KiB of UTF-8; an empty string clears it. */
+  setClipboard(text: string): Promise<void>;
 }
-/** A control connection that owns input until `close()`. `input` sends one raw event. */
+/** A control connection that owns input until `close()`, or until a viewer takes control, which rejects with `control_taken`. `input` sends one raw event. */
 export interface Session {
   surface: { width: number; height: number };
   capabilities(): Promise<Capabilities>;
@@ -262,6 +267,18 @@ export function createClient(options: ClientOptions = {}): Client {
       if (!Array.isArray(events) || !events.length) throw new RelayError('invalid_input', 'Input must be a nonempty array');
       return send(events.map(event => [event]));
     },
+    async clipboard() {
+      const result = await request<{ text: unknown }>(server, '/clipboard');
+      if (typeof result?.text !== 'string') throw new RelayError('protocol_error', 'Invalid clipboard result');
+      return result.text;
+    },
+    async setClipboard(text) {
+      if (typeof text !== 'string' || text.includes('\0')) throw new RelayError('invalid_input', 'Clipboard text must be a string without NUL characters');
+      const body = new TextEncoder().encode(text);
+      if (body.length > MAX_CLIPBOARD_BYTES) throw new RelayError('invalid_input', `Clipboard text exceeds ${MAX_CLIPBOARD_BYTES / 1024} KiB`);
+      const result = await request<{ length: unknown }>(server, '/clipboard', false, body);
+      if (result?.length !== body.length) throw new RelayError('protocol_error', 'Invalid clipboard result');
+    },
   };
 }
 
@@ -273,7 +290,7 @@ export async function connect(options: ClientOptions = {}): Promise<Session> {
   const { url, protocols } = socketTarget(server.base, '/control', server.token);
   const socket = new WebSocket(url, protocols);
   socket.binaryType = 'arraybuffer';
-  let generation = 0, sequence = 0, closed = false, ready = false;
+  let generation = 0, sequence = 0, closed = false, ready = false, ended: RelayError | undefined;
   const pending = new Map<number, { resolve: () => void; reject: (error: RelayError) => void; timer: ReturnType<typeof setTimeout> }>();
   let resolveReady!: (surface: Session['surface']) => void;
   let rejectReady!: (error: RelayError) => void;
@@ -281,6 +298,7 @@ export async function connect(options: ClientOptions = {}): Promise<Session> {
   const finish = (error: RelayError) => {
     if (closed) return;
     closed = true;
+    ended = error;
     server.signal?.removeEventListener('abort', cancel);
     if (!ready) rejectReady(error);
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(error); }
@@ -290,7 +308,11 @@ export async function connect(options: ClientOptions = {}): Promise<Session> {
   const cancel = () => finish(new RelayError('canceled', 'Control connection canceled.'));
   server.signal?.addEventListener('abort', cancel, { once: true });
   socket.addEventListener('error', () => finish(new RelayError('unreachable', 'The connection failed.')));
-  socket.addEventListener('close', () => finish(new RelayError('disconnected', 'Control connection closed')));
+  socket.addEventListener('close', ({ code }) => finish(code === CLOSE_TAKEN
+    ? new RelayError('control_taken', 'A viewer took control of the desktop.', { hint: 'Wait for the viewer to release control, then connect again.' })
+    : code === CLOSE_BUSY
+      ? new RelayError('busy', 'Another controller holds control of the desktop.', { hint: 'Wait for it to release control, then connect again.' })
+      : new RelayError('disconnected', 'Control connection closed')));
   socket.addEventListener('message', ({ data }) => {
     try {
       if (!(data instanceof ArrayBuffer)) throw new Error('Non-binary message');
@@ -318,11 +340,11 @@ export async function connect(options: ClientOptions = {}): Promise<Session> {
     capabilities: () => request(server, '/capabilities'),
     status: () => request(server, '/metrics'),
     async screenshot(path) {
-      if (closed) throw new RelayError('disconnected', 'Control connection closed');
+      if (closed) throw ended!;
       return screenshot({ ...options, url: server.base.href, timeout: server.timeout, token: server.token }, path);
     },
     input(event) {
-      if (closed) return Promise.reject(new RelayError('disconnected', 'Control connection closed'));
+      if (closed) return Promise.reject(ended!);
       if (pending.size >= MAX_INPUT_PENDING) return Promise.reject(new RelayError('busy', 'Too many pending input requests'));
       if (sequence === 0xffffffff) return Promise.reject(new RelayError('protocol_error', 'Input sequence exhausted; reconnect'));
       let message: Uint8Array;
