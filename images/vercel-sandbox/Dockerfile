@@ -52,7 +52,7 @@ ARG SOURCE_REVISION
 USER root
 RUN set -eu; \
     : "${SOURCE_REVISION:?pass --build-arg SOURCE_REVISION=\$(git rev-parse HEAD)}"; \
-    relay="$(npm root -g)/screen-relay"; \
+    relay="$(HOME=/root npm root -g)/screen-relay"; \
     version=$(node -p "require('$relay/package.json').version"); \
     doc=/usr/share/doc/screen-relay; \
     cp "$relay/LICENSE" "$relay/THIRD-PARTY-NOTICES.md" "$doc/"; \
