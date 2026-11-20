@@ -35,3 +35,37 @@ WORKDIR /vercel
 RUN screen-relay install --yes && \
     screen-relay doctor && \
     command -v xdotool
+
+# The prebuilt engine links x264, so the image carries what GPL-3.0 asks of a
+# binary: the license texts, x264's license and copyright notices, and where
+# to get the exact source of both. SOURCE_REVISION is the screen-relay commit
+# the image was built from.
+ARG SOURCE_REVISION=unknown
+USER root
+RUN set -eu; \
+    relay="$(npm root -g)/screen-relay"; \
+    version=$(node -p "require('$relay/package.json').version"); \
+    doc=/usr/share/doc/screen-relay; \
+    mkdir -p "$doc"; \
+    cp "$relay/LICENSE" "$relay/THIRD-PARTY-NOTICES.md" "$doc/"; \
+    cp -r "$relay/LICENSES" "$doc/"; \
+    x264=$(dpkg-query -W -f='${Package}\n' 'libx264-[0-9]*' | head -n1); \
+    x264_source=$(dpkg-query -W -f='${source:Package} ${source:Version}' "$x264"); \
+    cp "/usr/share/doc/$x264/copyright" "$doc/x264-copyright"; \
+    . /etc/os-release; \
+    case "$ID" in \
+      ubuntu) x264_url="https://launchpad.net/ubuntu/+source/${x264_source% *}/${x264_source#* }" ;; \
+      *) x264_url="https://snapshot.debian.org/package/${x264_source% *}/${x264_source#* }/" ;; \
+    esac; \
+    printf '%s\n' \
+      "This image contains screen-relay $version, whose engine links x264." \
+      "The engine and x264 together are distributed under GPL-3.0-only (LICENSE)." \
+      "x264's license and copyright notices are in x264-copyright." \
+      "" \
+      "Source:" \
+      "- screen-relay: https://github.com/vercel-labs/screen-relay/tree/$SOURCE_REVISION (version $version)" \
+      "- x264: $x264_source from $PRETTY_NAME, $x264_url" \
+      "  or: apt-get source ${x264_source% *}=${x264_source#* }" \
+      > "$doc/SOURCE"; \
+    cat "$doc/SOURCE"
+USER ubuntu
