@@ -1051,3 +1051,25 @@ test('an ended grant stays disconnected until a new credential is supplied', () 
   assert.equal(app.sockets.at(-1).url, 'ws://localhost/stream?clipboard=1');
   assert.equal(action('control').hidden, false);
 });
+
+test('a WebRTC link falls back to the WebSocket stream when the engine does not offer WebRTC', async () => {
+  const app = viewer({ hash: '#transport=rtc' });
+  await settle();
+  assert.equal(app.sockets.length, 1);
+  assert.equal(app.sockets[0].url, 'ws://localhost/stream?clipboard=1');
+  const stats = await app.context.window.__relayRtcStats();
+  assert.equal(stats.transportMode, 'rtc');
+  assert.equal(stats.transportState, 'rtc-fallback-ws');
+  assert.equal(stats.transport.reason, 'the engine does not offer WebRTC');
+});
+
+test('a WebRTC-only link reports the failure and opens no WebSocket', async () => {
+  const app = viewer({ hash: '#transport=rtc-only' });
+  await settle();
+  assert.equal(app.sockets.length, 0);
+  assert.equal(app.document.querySelector('#status').textContent, 'WebRTC failed: the engine does not offer WebRTC');
+  const stats = await app.context.window.__relayRtcStats();
+  assert.equal(stats.transportMode, 'rtc-only');
+  assert.equal(stats.transportState, 'rtc-failed');
+  assert.equal(stats.transport.reason, 'the engine does not offer WebRTC');
+});

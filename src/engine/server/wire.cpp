@@ -101,6 +101,20 @@ ConnectionPlan connectionPlan(Socket socket, size_t viewerCount, bool streamOwns
   }
   return {};
 }
+bool rtcSessionAuthorized(bool callerIsOwner, uint64_t callerGrantId, uint64_t sessionGrantId) {
+  if (callerIsOwner) return true;
+  return callerGrantId != 0 && sessionGrantId != 0 && callerGrantId == sessionGrantId;
+}
+RtcAdmission rtcAdmission(size_t wsViewerCount, size_t wsGrantViewerCount,
+                          bool activeRtc, uint64_t activeRtcGrantId, uint64_t callerGrantId) {
+  const bool callerIsOwner = callerGrantId == 0;
+  if (activeRtc && !rtcSessionAuthorized(callerIsOwner, callerGrantId, activeRtcGrantId)) {
+    return {false, true};
+  }
+  const bool totalOk = wsViewerCount < max_viewers;
+  const bool grantOk = callerIsOwner || wsGrantViewerCount < max_viewers - 1;
+  return {totalOk && grantOk, false};
+}
 bool frameMessage(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint32_t lastSequence, const EncodedFrame& f,
                   uint16_t width, uint16_t height) {
   return frameMessage(out, pre, generation, lastSequence, f.sequence, f, width, height);

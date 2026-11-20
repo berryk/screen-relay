@@ -6,6 +6,9 @@
 #include "screenshot.hpp"
 #include "stream-hub.hpp"
 #include "wire.hpp"
+#ifdef RELAY_RTC
+#include "rtc.hpp"
+#endif
 #include <libwebsockets.h>
 #include <array>
 #include <atomic>
@@ -27,7 +30,7 @@ struct HttpResponse {
   size_t offset;
   Socket socket;
   uint64_t upload_expected, grant_id;
-  bool image_headers, clipboard, input_reply, input_headers, closing;
+  bool image_headers, clipboard, input_reply, input_headers, closing, rtc_offer;
   unsigned reply_status, image_status;
   const char* image_type;
 };
@@ -81,16 +84,44 @@ struct Server {
   std::unique_ptr<InputController> input;
   uint32_t nextGeneration = 0;
   uint16_t width = 0, height = 0;
+#ifdef RELAY_RTC
+  /** Explicit stage of an in-flight POST /rtc offer before promotion to an active session. */
+  enum class RtcOfferStage : uint8_t { none, receiving_body, gathering };
+  /** Explicit WebRTC active-session and pending-offer state owned by Server. */
+  struct RtcSlot {
+    std::shared_ptr<RtcSession> active;
+    uint64_t active_subscriber_id = 0;
+    uint64_t active_grant_id = 0;
+    bool active_owns_input = false;
+    RtcOfferStage offer_stage = RtcOfferStage::none;
+    lws* offer_client = nullptr;
+    std::shared_ptr<RtcSession> pending;
+    uint64_t pending_grant_id = 0;
+    bool pending_can_input = false;
+
+    bool hasActive() const { return active && !active->closed(); }
+    bool hasOffer() const { return offer_stage != RtcOfferStage::none; }
+  };
+  RtcSlot rtc;
+#endif
 
   explicit Server(Config settings);
   ViewerSlot* slotFor(lws* wsi);
+  void wsViewerCounts(size_t& count, size_t& grantCount, bool& inputViewerHasGrant) const;
   ConnectionPlan planConnection(Socket socket, bool grant);
+#ifdef RELAY_RTC
+  RtcAdmission planRtcAdmission(uint64_t callerGrantId) const;
+  void abortPendingRtc(bool evictClient, uint16_t code = LWS_CLOSE_STATUS_POLICY_VIOLATION,
+                       const char* reason = "grant ended");
+  void closeActiveRtc();
+#endif
   int startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, bool clipboardNotices);
   void updateSlotFlow(ViewerSlot& slot);
   int writeSlot(ViewerSlot& slot);
   void release();
   void endStream(lws* wsi);
   void endControl();
+  void endRtc();
   void end();
   void expireGrants();
   /** Sends a close code from the timer callback; defaults to the takeover code. */
@@ -99,6 +130,7 @@ struct Server {
   bool streamMessage(ViewerSlot& slot);
   bool controlMessage();
   std::string metrics();
+  std::string rtcConfigJson() const;
   /** Holds the HTTP response until the input backend applies or drops the batch. */
   int deferInput(lws* wsi, InputStatus status, size_t applied, size_t posted);
   std::vector<std::shared_ptr<InputReply>> readyInputs();

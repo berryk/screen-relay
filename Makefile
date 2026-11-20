@@ -41,6 +41,11 @@ CXXFLAGS ?= -O2
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wpedantic -pthread
 BACKEND_LIBS = $(foreach backend,$(BACKENDS),$(BACKEND_LIBS_$(backend)))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) $(BACKEND_LIBS) -pthread
+ifeq ($(RTC),1)
+RTC_PKGS := $(shell pkg-config --exists libdatachannel && echo libdatachannel)
+CPPFLAGS += -DRELAY_RTC $(if $(RTC_PKGS),$(shell pkg-config --cflags $(RTC_PKGS)),$(if $(wildcard /opt/homebrew/include/rtc),-I/opt/homebrew/include))
+LDLIBS += $(if $(RTC_PKGS),$(shell pkg-config --libs $(RTC_PKGS)),$(if $(wildcard /opt/homebrew/lib/libdatachannel.*),-L/opt/homebrew/lib) -ldatachannel)
+endif
 
 CORE_SRCS = $(wildcard src/engine/core/*.cpp)
 ENCODER_PLATFORM_SRCS = $(if $(HAS_MACOS),src/engine/backends/macos/vt_encoder.mm)
