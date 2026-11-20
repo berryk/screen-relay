@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { Readable } from 'node:stream';
@@ -21,7 +21,29 @@ type Args = HostArgs & Record<string, any>;
 
 async function reapSession(directory: string, session: Record<string, any> | null, signal?: AbortSignal): Promise<boolean> {
   await reap(directory, session, signal);
+  try { rmSync(join(directory, 'ice-servers'), { force: true }); } catch {}
   return cleanupWaylandRuntime(session);
+}
+
+/** Strips sensitive --ice-server flags from detached supervisor argv and passes resolved servers via environment. */
+export function detachedSupervisorSpawn(argv: string[], env: NodeJS.ProcessEnv, iceServers?: string[]): { args: string[]; env: NodeJS.ProcessEnv } {
+  const args: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const token = argv[index];
+    if (token === '--') {
+      args.push(...argv.slice(index));
+      break;
+    }
+    if (token === '--ice-server') {
+      if (index + 1 < argv.length) index++;
+      continue;
+    }
+    if (token.startsWith('--ice-server=')) continue;
+    args.push(token);
+  }
+  const childEnv: NodeJS.ProcessEnv = { ...env, SCREEN_RELAY_READY_FD: '3' };
+  if (iceServers?.length) childEnv.SCREEN_RELAY_ICE_SERVERS = iceServers.join(' ');
+  return { args, env: childEnv };
 }
 
 export async function cmdUp(args: Args): Promise<number> {
@@ -109,8 +131,9 @@ async function detach(args: Args, directory: string, timeout: number, warnings: 
   await probe.close();
   const logPath = join(directory, 'supervisor.log');
   const log = openSync(logPath, 'w', 0o600);
-  const child = spawn(process.execPath, [process.argv[1] ?? '', ...process.argv.slice(2), ...chosen], {
-    cwd: process.cwd(), env: { ...process.env, SCREEN_RELAY_READY_FD: '3' }, detached: true, windowsHide: true,
+  const detached = detachedSupervisorSpawn(process.argv.slice(2), process.env, Array.isArray(args['ice-server']) ? args['ice-server'] : undefined);
+  const child = spawn(process.execPath, [process.argv[1] ?? '', ...detached.args, ...chosen], {
+    cwd: process.cwd(), env: detached.env, detached: true, windowsHide: true,
     stdio: ['ignore', log, log, 'pipe'],
   });
   const signal = args.signal as AbortSignal | undefined;
