@@ -45,9 +45,9 @@ RUN screen-relay install --yes && \
 # The prebuilt engine links x264, so it is distributed under GPL-3.0, while
 # screen-relay's own source is Apache-2.0. The image carries what GPL-3.0 asks
 # of a binary: the license texts, x264's license and copyright notices, and the
-# exact source of both in source/ (x264's comes from apt-get source), so a
-# pointer can't go stale. SOURCE_REVISION
-# is the screen-relay commit the image is built from; the build fails without it.
+# exact source of both in source/ (x264's from apt-get source), so no pointer
+# can go stale. SOURCE_REVISION is the screen-relay commit the image is built
+# from; the build fails without it.
 ARG SOURCE_REVISION
 USER root
 RUN set -eu; \
