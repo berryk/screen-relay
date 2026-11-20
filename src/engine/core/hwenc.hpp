@@ -9,11 +9,16 @@ namespace relay {
 /** A hardware H.264 encoder from libavcodec that takes NV12 in system memory and returns one Annex B access unit per frame. */
 class HwEncoder {
  public:
-  /** Opens the named libavcodec encoder, or with "auto" the first platform encoder that encodes an IDR; returns null when none works. */
-  static std::unique_ptr<HwEncoder> open(const std::string& name, int width, int height, unsigned fps, uint64_t bitrate);
+  /**
+   * Opens the named libavcodec encoder, or with "auto" the first platform encoder that encodes an IDR; returns null when none works.
+   * With bgra, an encoder that converts colour itself takes the captured BGRA pixels in plane 0 instead of NV12.
+   */
+  static std::unique_ptr<HwEncoder> open(const std::string& name, int width, int height, unsigned fps, uint64_t bitrate, bool bgra);
   /** Stops "auto" from choosing hardware again in this process, after an encoder failed while running. */
   static void disable();
   ~HwEncoder();
+  /** True when plane 0 holds BGRA pixels for the encoder to convert, false when planes 0 and 1 hold NV12. */
+  bool rgb() const;
   uint8_t* plane(int index) const;
   int stride(int index) const;
   const std::string& name() const;

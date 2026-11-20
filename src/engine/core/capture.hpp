@@ -49,6 +49,8 @@ class CaptureEncoder {
   void endSession(uint32_t generation);
   void acknowledge(uint32_t generation, uint32_t sequence);
   void setFlowControl(uint32_t generation, unsigned window, uint64_t bitrate, bool paused, uint64_t admit_until_us);
+  /** Makes the next encoded frame an IDR and republishes the cursor, for a viewer that joins the stream. */
+  void requestKeyframe();
   CaptureStats stats() const;
   std::string error() const;
   void stop();

@@ -68,8 +68,19 @@ struct Server {
     bool failed = false;
     std::vector<uint8_t> received;
     CaptureEncoder capture;
+    bool started = false;
+    /** The stream whose encoder this watch-only viewer shares, or null when it encodes for itself. */
+    Stream* leader = nullptr;
+    std::vector<Stream*> followers;
+    uint32_t follower_sequence = 0;
+    bool awaiting_keyframe = false;
+    uint64_t keyframe_requested_us = 0;
     explicit Stream(Server& server);
     void begin(lws* wsi, uint32_t gen);
+    /** Starts this viewer on another stream's encoded frames instead of its own encoder. */
+    void follow(Stream& source, lws* wsi, uint32_t gen);
+    /** Queues a frame from the leader under this viewer's own sequence; called with the leader's mutex held. */
+    void relay(const EncodedFrame& frame, Stream& source);
     void end();
     void updateFlow(bool proxy);
     bool timedOut();

@@ -18,6 +18,7 @@ namespace {
 struct Candidate {
   const char* name;
   AVHWDeviceType upload;
+  AVPixelFormat rgb;
   bool dynamic_bitrate;
   const char* options;
   const char* fallback;
@@ -25,15 +26,15 @@ struct Candidate {
 /** Platform encoders in the order "auto" tries them; options follow Sunshine's low-latency settings. */
 constexpr Candidate candidates[] = {
 #if defined(__APPLE__)
-  {"h264_videotoolbox", AV_HWDEVICE_TYPE_NONE, false, "realtime=1:prio_speed=1:allow_sw=0", nullptr},
+  {"h264_videotoolbox", AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_BGRA, false, "realtime=1:prio_speed=1:allow_sw=0", nullptr},
 #else
-  {"h264_nvenc", AV_HWDEVICE_TYPE_NONE, true, "preset=p1:tune=ull:rc=cbr:delay=0:zerolatency=1:forced-idr=1", nullptr},
+  {"h264_nvenc", AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_BGR0, true, "preset=p1:tune=ull:rc=cbr:delay=0:zerolatency=1:forced-idr=1", nullptr},
 #if defined(_WIN32)
-  {"h264_qsv", AV_HWDEVICE_TYPE_NONE, true, "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1:low_power=1", "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1"},
-  {"h264_amf", AV_HWDEVICE_TYPE_NONE, false, "usage=ultralowlatency:rc=cbr:forced_idr=1:latency=1:async_depth=1:frame_skipping=0:filler_data=0", "usage=lowlatency:rc=cbr:forced_idr=1:async_depth=1"},
+  {"h264_qsv", AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_NONE, true, "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1:low_power=1", "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1"},
+  {"h264_amf", AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_BGR0, false, "usage=ultralowlatency:rc=cbr:forced_idr=1:latency=1:async_depth=1:frame_skipping=0:filler_data=0", "usage=lowlatency:rc=cbr:forced_idr=1:async_depth=1"},
 #else
-  {"h264_vaapi", AV_HWDEVICE_TYPE_VAAPI, false, "async_depth=1:rc_mode=CBR:sei=0:low_power=1", "async_depth=1:rc_mode=CBR:sei=0"},
-  {"h264_qsv", AV_HWDEVICE_TYPE_NONE, true, "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1:low_power=1", "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1"},
+  {"h264_vaapi", AV_HWDEVICE_TYPE_VAAPI, AV_PIX_FMT_NONE, false, "async_depth=1:rc_mode=CBR:sei=0:low_power=1", "async_depth=1:rc_mode=CBR:sei=0"},
+  {"h264_qsv", AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_NONE, true, "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1:low_power=1", "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1"},
 #endif
 #endif
 };
@@ -53,6 +54,7 @@ struct HwEncoder::Impl {
   int width = 0, height = 0;
   unsigned fps = 0;
   uint64_t bitrate = 0;
+  AVPixelFormat format = AV_PIX_FMT_NV12;
   std::chrono::steady_clock::time_point changed{};
   AVBufferRef* device = nullptr;
   AVCodecContext* context = nullptr;
@@ -72,7 +74,7 @@ struct HwEncoder::Impl {
     context->width = width; context->height = height;
     context->time_base = AVRational{1, 1000000};
     context->framerate = AVRational{int(fps), 1};
-    context->pix_fmt = AV_PIX_FMT_NV12;
+    context->pix_fmt = format;
     context->max_b_frames = 0;
     context->gop_size = candidate && candidate->upload == AV_HWDEVICE_TYPE_VAAPI ? INT16_MAX : INT_MAX;
     context->keyint_min = INT_MAX;
@@ -111,10 +113,16 @@ struct HwEncoder::Impl {
     return reason;
   }
   bool allocate() {
-    frame = av_frame_alloc(); packet = av_packet_alloc();
+    av_frame_free(&frame);
+    if (!packet) packet = av_packet_alloc();
+    frame = av_frame_alloc();
     if (!frame || !packet) return false;
-    frame->format = AV_PIX_FMT_NV12; frame->width = width; frame->height = height;
+    frame->format = format; frame->width = width; frame->height = height;
     if (av_frame_get_buffer(frame, 0) < 0) return false;
+    if (format != AV_PIX_FMT_NV12) {
+      std::memset(frame->data[0], 0, size_t(frame->linesize[0]) * size_t(height));
+      return true;
+    }
     std::memset(frame->data[0], 16, size_t(frame->linesize[0]) * size_t(height));
     std::memset(frame->data[1], 128, size_t(frame->linesize[1]) * size_t(height / 2));
     return true;
@@ -146,8 +154,17 @@ struct HwEncoder::Impl {
     if (av_frame_make_writable(frame) < 0) throw std::runtime_error("frame not writable");
     return keyframe;
   }
-  /** Opens this candidate and checks that a forced IDR comes back as a keyframe in Annex B. */
-  std::string start() {
+  /** Opens this candidate with BGRA input when asked and supported, else NV12, and checks the first forced IDR. */
+  std::string start(bool bgra) {
+    if (bgra && candidate && candidate->rgb != AV_PIX_FMT_NONE) {
+      format = candidate->rgb;
+      if (test().empty()) return {};
+    }
+    format = AV_PIX_FMT_NV12;
+    return test();
+  }
+  /** Opens the codec in the current format and checks that a forced IDR comes back as a keyframe in Annex B. */
+  std::string test() {
     if (!allocate()) return "out of memory";
     std::string reason = openWithFallback();
     if (!reason.empty()) return reason;
@@ -163,7 +180,7 @@ struct HwEncoder::Impl {
 HwEncoder::HwEncoder(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 HwEncoder::~HwEncoder() = default;
 
-std::unique_ptr<HwEncoder> HwEncoder::open(const std::string& name, int width, int height, unsigned fps, uint64_t bitrate) {
+std::unique_ptr<HwEncoder> HwEncoder::open(const std::string& name, int width, int height, unsigned fps, uint64_t bitrate, bool bgra) {
   std::lock_guard<std::mutex> lock(probe_mutex);
   av_log_set_level(AV_LOG_FATAL);
   auto attempt = [&](const Candidate* candidate, const std::string& encoder) -> std::unique_ptr<HwEncoder> {
@@ -171,12 +188,12 @@ std::unique_ptr<HwEncoder> HwEncoder::open(const std::string& name, int width, i
     impl->candidate = candidate; impl->name = encoder;
     impl->width = width; impl->height = height; impl->fps = fps; impl->bitrate = bitrate;
     impl->changed = std::chrono::steady_clock::now();
-    const std::string reason = impl->start();
+    const std::string reason = impl->start(bgra);
     if (!reason.empty()) {
       std::fprintf(stderr, "encoder %s unavailable: %s\n", encoder.c_str(), reason.c_str());
       return nullptr;
     }
-    std::fprintf(stderr, "encoder: %s\n", encoder.c_str());
+    std::fprintf(stderr, "encoder: %s (%s input)\n", encoder.c_str(), impl->format == AV_PIX_FMT_NV12 ? "NV12" : "BGRA");
     return std::unique_ptr<HwEncoder>(new HwEncoder(std::move(impl)));
   };
   if (name != "auto") {
@@ -198,6 +215,7 @@ void HwEncoder::disable() {
   disabled = true;
 }
 
+bool HwEncoder::rgb() const { return impl_->format != AV_PIX_FMT_NV12; }
 uint8_t* HwEncoder::plane(int index) const { return impl_->frame->data[index]; }
 int HwEncoder::stride(int index) const { return impl_->frame->linesize[index]; }
 const std::string& HwEncoder::name() const { return impl_->name; }
@@ -227,8 +245,9 @@ namespace relay {
 struct HwEncoder::Impl {};
 HwEncoder::HwEncoder(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 HwEncoder::~HwEncoder() = default;
-std::unique_ptr<HwEncoder> HwEncoder::open(const std::string&, int, int, unsigned, uint64_t) { return nullptr; }
+std::unique_ptr<HwEncoder> HwEncoder::open(const std::string&, int, int, unsigned, uint64_t, bool) { return nullptr; }
 void HwEncoder::disable() {}
+bool HwEncoder::rgb() const { return false; }
 uint8_t* HwEncoder::plane(int) const { return nullptr; }
 int HwEncoder::stride(int) const { return 0; }
 const std::string& HwEncoder::name() const { static const std::string none; return none; }

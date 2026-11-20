@@ -68,6 +68,7 @@ Server::Stream::Stream(Server& server) : capture([this, &server](EncodedFrame&& 
   if (!flow.enqueue(frame.sequence, frame.annex_b.size(), frame.pts_us, nowUs())) {
     failed = true; lws_cancel_service(server.context); return false;
   }
+  for (auto* follower : followers) follower->relay(frame, *this);
   pending.push_back(std::move(frame));
   lws_cancel_service(server.context);
   return true;
@@ -75,6 +76,10 @@ Server::Stream::Stream(Server& server) : capture([this, &server](EncodedFrame&& 
 backendFor(server.config.backend).capture, [this, &server](uint32_t gen, CursorImage&& cursor) {
   std::lock_guard<std::mutex> lock(mutex);
   if (!generation || gen != generation) return;
+  for (auto* follower : followers) {
+    std::lock_guard<std::mutex> other(follower->mutex);
+    if (follower->generation) follower->pending_cursor = cursor;
+  }
   pending_cursor = std::move(cursor);
   lws_cancel_service(server.context);
 }) {
@@ -89,7 +94,40 @@ void Server::Stream::begin(lws* wsi, uint32_t gen) {
   { std::lock_guard<std::mutex> lock(mutex); generation = gen; }
   capture.beginSession(gen);
 }
+void Server::Stream::follow(Stream& source, lws* wsi, uint32_t gen) {
+  viewer = wsi;
+#ifdef __linux__
+  configureStreamSocket(wsi);
+#endif
+  { std::lock_guard<std::mutex> lock(mutex); generation = gen; follower_sequence = 0; awaiting_keyframe = true; keyframe_requested_us = nowUs(); }
+  leader = &source;
+  { std::lock_guard<std::mutex> lock(source.mutex); source.followers.push_back(this); }
+  source.capture.requestKeyframe();
+}
+void Server::Stream::relay(const EncodedFrame& frame, Stream& source) {
+  bool request = false;
+  { std::lock_guard<std::mutex> lock(mutex);
+    if (!generation || failed || (awaiting_keyframe && !frame.keyframe)) return;
+    const uint64_t now = nowUs();
+    if (!flow.enqueue(follower_sequence + 1, frame.annex_b.size(), frame.pts_us, now)) {
+      awaiting_keyframe = true;
+      request = now - std::min(now, keyframe_requested_us) >= 1000000;
+      if (request) keyframe_requested_us = now;
+    } else {
+      EncodedFrame copy = frame;
+      copy.generation = generation; copy.sequence = ++follower_sequence;
+      pending.push_back(std::move(copy));
+      awaiting_keyframe = false;
+    }
+  }
+  if (request) source.capture.requestKeyframe();
+}
 void Server::Stream::end() {
+  if (leader) {
+    std::lock_guard<std::mutex> lock(leader->mutex);
+    leader->followers.erase(std::remove(leader->followers.begin(), leader->followers.end(), this), leader->followers.end());
+  }
+  leader = nullptr;
   uint32_t old;
   { std::lock_guard<std::mutex> lock(mutex); old = generation; generation = 0; pending.clear(); pending_cursor.reset(); flow.reset(); failed = false; }
   last_write_cursor = false;
@@ -119,16 +157,12 @@ ConnectionPlan Server::planConnection(Socket socket, bool grant) {
   return connectionPlan(socket, count, input_viewer != nullptr, control != nullptr, grantCount, grant, inputViewerHasGrant);
 }
 int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, bool clipboardNotices) {
-  auto slot = std::find_if(streams.begin(), streams.end(), [](const auto& stream) { return !stream || !stream->viewer; });
-  if (slot != streams.end() && !*slot) {
-    auto stream = std::make_unique<Stream>(*this);
-    std::string error;
-    if (!stream->capture.start(error)) {
-      std::cerr << "Viewer capture startup failed: " << error << '\n';
-      return -1;
-    }
-    *slot = std::move(stream);
+  Stream* source = nullptr;
+  if (socket == Socket::watch) {
+    for (auto& stream : streams) if (stream && stream->viewer && !stream->leader && (!source || stream->viewer == input_viewer)) source = stream.get();
   }
+  auto slot = std::find_if(streams.begin(), streams.end(), [](const auto& stream) { return !stream || !stream->viewer; });
+  if (slot != streams.end() && !*slot) *slot = std::make_unique<Stream>(*this);
   if (plan.closeStream) {
     auto* previous = input_viewer;
     evict(previous);
@@ -141,8 +175,21 @@ int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, boo
   if (plan.closeControl) { evict(control); endControl(); }
   if (socket != Socket::watch) { input_viewer = wsi; input->resetLocks(); }
   auto& stream = **slot;
+  if (!source && !stream.started) {
+    std::string error;
+    if (!stream.capture.start(error)) {
+      std::cerr << "Viewer capture startup failed: " << error << '\n';
+      return -1;
+    }
+    stream.started = true;
+  }
   stream.width = width; stream.height = height;
   stream.clipboard_notices = clipboardNotices;
+  if (source) {
+    stream.follow(*source, wsi, ++nextGeneration);
+    stream.updateFlow(config.proxy);
+    return 0;
+  }
   stream.begin(wsi, ++nextGeneration);
   stream.updateFlow(config.proxy);
   return 0;
@@ -151,6 +198,12 @@ void Server::release() { if (input) input->releaseAll(); }
 void Server::endStream(lws* wsi) {
   for (auto slot = streams.begin(); slot != streams.end(); ++slot) {
     if (!*slot || (*slot)->viewer != wsi) continue;
+    std::vector<Stream*> followers;
+    { std::lock_guard<std::mutex> lock((*slot)->mutex); followers.swap((*slot)->followers); }
+    for (auto* follower : followers) {
+      follower->leader = nullptr;
+      evict(follower->viewer, LWS_CLOSE_STATUS_GOINGAWAY, "source ended");
+    }
     if (input_viewer == wsi) { release(); input->cancel(); input_viewer = nullptr; }
     (*slot)->end();
     if (slot != streams.begin()) slot->reset();

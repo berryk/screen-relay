@@ -111,6 +111,7 @@ struct Resources {
   std::unique_ptr<HwEncoder> hw;
   uint8_t* planes[2] = {};
   int strides[2] = {};
+  bool rgb = false;
   std::vector<uint8_t> mb_info;
   int threads;
   std::vector<std::vector<uint8_t>> scratch;
@@ -152,9 +153,11 @@ struct Resources {
     wide_vbv = true;
   }
   void init() {
-    if (settings.encoder != "x264") hw = HwEncoder::open(settings.encoder, width, height, settings.fps, settings.start_bitrate);
+    if (settings.encoder != "x264")
+      hw = HwEncoder::open(settings.encoder, width, height, settings.fps, settings.start_bitrate, format == PixelFormat::BGRA);
     if (hw) {
-      for (int plane = 0; plane < 2; ++plane) { planes[plane] = hw->plane(plane); strides[plane] = hw->stride(plane); }
+      rgb = hw->rgb();
+      for (int plane = 0; plane < (rgb ? 1 : 2); ++plane) { planes[plane] = hw->plane(plane); strides[plane] = hw->stride(plane); }
       return;
     }
     useSoftware();
@@ -162,6 +165,7 @@ struct Resources {
   /** Switches to x264; the next frame must be an IDR because the new planes start empty. */
   void useSoftware() {
     hw.reset();
+    rgb = false;
     openEncoder();
     if (!frame_allocated) {
       require(x264_picture_alloc(&frame, X264_CSP_NV12, width, height) == 0, "allocating YUV buffer failed");
@@ -197,6 +201,29 @@ struct Resources {
     require(!failed, "RGB conversion failed");
     return changed;
   }
+  /** Writes the whole captured picture into the encoder's planes, as BGRA or converted to NV12. */
+  bool convertFull(const FrameView& view) {
+    if (!rgb) {
+      const auto convert = view.format == PixelFormat::BGRA ? bgraToNv12 : argbToNv12;
+      return convert(view.data, view.stride, planes[0], strides[0], planes[1], strides[1], view.width, view.height);
+    }
+    for (int y = 0; y < view.height; ++y)
+      std::memcpy(planes[0] + size_t(y) * strides[0], view.data + size_t(y) * view.stride, size_t(view.width) * 4);
+    return true;
+  }
+  /** Copies one damaged macroblock of BGRA pixels into plane 0 and returns whether any of them changed. */
+  bool copyBlock(const FrameView& view, int left, int right, int y0, int y1) {
+    bool different = false;
+    for (int y = y0; y < y1; ++y) {
+      uint8_t* target = planes[0] + size_t(y) * strides[0] + size_t(left) * 4;
+      const uint8_t* source = view.data + size_t(y - view.y) * view.stride + size_t(left - view.x) * 4;
+      if (std::memcmp(target, source, size_t(right - left) * 4) != 0) {
+        std::memcpy(target, source, size_t(right - left) * 4);
+        different = true;
+      }
+    }
+    return different;
+  }
   bool convertRows(const FrameView& view, int begin, int end, std::vector<uint8_t>& buffer, bool& changed) {
     const int columns = (width + 15) / 16;
     const auto convert = view.format == PixelFormat::BGRA ? bgraToNv12 : argbToNv12;
@@ -209,6 +236,14 @@ struct Resources {
         while (column <= (view.x + view.width - 1) / 16 && !mb_info[row * columns + column]) ++column;
         const int x0 = std::max(first * 16, view.x);
         const int x1 = std::min(column * 16, view.x + view.width);
+        if (rgb) {
+          for (int block = first; block < column; ++block) {
+            const bool different = copyBlock(view, std::max(block * 16, x0), std::min(block * 16 + 16, x1), y0, y1);
+            mb_info[row * columns + block] = different ? 0 : uint8_t(X264_MBINFO_CONSTANT);
+            changed |= different;
+          }
+          continue;
+        }
         if (!convert(view.data + (y0 - view.y) * view.stride + (x0 - view.x) * 4, view.stride,
                      buffer.data(), width, buffer.data() + width * 16, width, x1 - x0, y1 - y0)) return false;
         for (int block = first; block < column; ++block) {
@@ -250,7 +285,7 @@ struct CaptureEncoder::Impl {
   std::condition_variable ready;
   std::thread worker;
   Wake wake_event;
-  bool stopping = false, initialized = false, running = false;
+  bool stopping = false, initialized = false, running = false, keyframe_requested = false;
   std::string startup_error;
   std::string fatal_error;
   uint32_t generation = 0, sequence = 0, acknowledged = 0;
@@ -307,8 +342,8 @@ struct CaptureEncoder::Impl {
         {
           std::lock_guard<std::mutex> lock(mutex);
           if (stopping) break;
-          if (revision != seen_revision) {
-            seen_revision = revision; dirty = true; force_idr = true;
+          if (revision != seen_revision || keyframe_requested) {
+            seen_revision = revision; keyframe_requested = false; dirty = true; force_idr = true;
             reset_refinement();
             refresh_cursor = true;
           }
@@ -355,10 +390,7 @@ struct CaptureEncoder::Impl {
                       view.format == r.format, "invalid capture frame");
               bool changed = true;
               if (force_idr) {
-                const auto convert = view.format == PixelFormat::BGRA ? bgraToNv12 : argbToNv12;
-                require(convert(view.data, view.stride, r.planes[0], r.strides[0],
-                                r.planes[1], r.strides[1], view.width, view.height),
-                        "RGB conversion failed");
+                require(r.convertFull(view), "RGB conversion failed");
               } else {
                 if (!source->changedRects(rects)) rects = {{view.x, view.y, view.width, view.height}};
                 changed = r.convertDamage(view, rects);
@@ -574,6 +606,12 @@ void CaptureEncoder::setFlowControl(uint32_t generation, unsigned window, uint64
   i.bitrate = std::clamp<uint64_t>(bitrate, std::max<uint64_t>(1, i.settings.min_bitrate / 4), i.settings.max_bitrate);
   i.paused = paused;
   i.admit_until_us = admit_until_us;
+  i.wake();
+}
+void CaptureEncoder::requestKeyframe() {
+  auto& i = *impl_;
+  std::lock_guard<std::mutex> lock(i.mutex);
+  i.keyframe_requested = true;
   i.wake();
 }
 CaptureStats CaptureEncoder::stats() const {

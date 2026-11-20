@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     std::cerr << "Capture startup failed: " << captureError << '\n';
     s.streams[0]->capture.stop(); return 1;
   }
+  s.streams[0]->started = true;
   try {
     s.input = std::make_unique<relay::InputController>(backend.input());
     const auto dimensions = s.input->dimensions();
