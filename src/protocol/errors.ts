@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export type ErrorClass = 'usage' | 'missing_input' | 'not_found' | 'conflict' | 'network' | 'platform' | 'permission' | 'config' | 'bug' | 'canceled';
 export interface NextCommand { command: string; argv: string[] }
 export interface ErrorOptions {

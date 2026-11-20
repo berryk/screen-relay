@@ -1,6 +1,6 @@
 # Third-party notices
 
-screen-relay is licensed under the Apache License, Version 2.0. See `LICENSE`.
+screen-relay is licensed under the GNU General Public License, version 3 (GPL-3.0-only). See `LICENSE`. The SDK and the wire protocol module (`src/sdk` and `src/protocol`, published as `screen-relay` and `screen-relay/protocol`) are licensed under the Apache License, Version 2.0. See `LICENSES/Apache-2.0.txt`.
 
 The published npm package contains the third-party software listed here.
 
@@ -28,7 +28,7 @@ THIS SOFTWARE.
 
 ### @vercel/detect-agent 1.2.7
 
-Copyright 2017 Vercel, Inc. Licensed under the Apache License, Version 2.0. The license text is in `LICENSE`.
+Copyright 2017 Vercel, Inc. Licensed under the Apache License, Version 2.0. The license text is in `LICENSES/Apache-2.0.txt`.
 
 ### MIT-licensed packages
 
@@ -68,9 +68,9 @@ The files in `src/engine/backends/linux/wayland/protocols/` are licensed under t
 
 ## Libraries the engine links when it is built
 
-screen-relay does not distribute these. `screen-relay install` builds the engine on your machine against the copies your system provides.
+`screen-relay install` builds the engine on your machine against the copies your system provides. A prebuilt engine, such as one in a container image, includes or links these libraries too.
 
-- x264: GPL-2.0-or-later. An engine binary that links x264 is covered by the GPL if you redistribute it.
+- x264: GPL-2.0-or-later. The engine links x264, so an engine binary and x264 together are a combined work, distributed under GPL-3.0-only. A distributed binary must come with the GPL-3.0 text, x264's license and copyright notices, and a way to get the matching source of both.
 - libwebsockets: MIT
 - zlib: zlib license
 - libX11, libXext, libXdamage, libXfixes, libXtst, libwayland-client, libxkbcommon: MIT and similar permissive licenses

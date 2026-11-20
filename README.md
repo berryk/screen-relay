@@ -5,7 +5,7 @@ Desktop streaming and control for humans and AI agents: watch a desktop in a bro
 <p>
   <a href="https://vercel.com/labs#active-experiments"><img alt="Vercel Labs Experiment" src="https://img.shields.io/badge/LABS-EXPERIMENT-0a0a0a.svg?style=for-the-badge&amp;logo=Vercel&amp;labelColor=000000" height="28"></a>
   <a href="https://www.npmjs.com/package/screen-relay"><img alt="npm version: screen-relay" src="https://img.shields.io/npm/v/screen-relay.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
-  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/LICENSE-APACHE--2.0-97ca00.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/LICENSE-GPL--3.0-97ca00.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
 </p>
 
 screen-relay starts a desktop on a Linux VM, sandbox, or container, or attaches to the display of a Mac or the signed-in desktop of a Windows PC, and streams it to a browser as H.264. An agent controls the same desktop one command at a time: it takes a screenshot, clicks or types, and takes another screenshot to check the result. The `screen-relay` CLI, a Node SDK, and an HTTP and WebSocket API all reach the same session.
@@ -111,4 +111,4 @@ Run the engine tests with `make test`, which also needs the FFmpeg development l
 
 ## License
 
-Apache-2.0. The engine links x264, which is licensed under GPL-2.0-or-later, from your system when `screen-relay install` builds it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+GPL-3.0-only, so a prebuilt engine that links x264 (GPL-2.0-or-later) can be distributed. The SDK and the wire protocol module (`screen-relay` and `screen-relay/protocol`, in `src/sdk` and `src/protocol`) stay Apache-2.0: they are TypeScript that never links x264, so apps can import them under the same terms as before. The Apache text is in [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt). See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
