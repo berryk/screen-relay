@@ -54,8 +54,8 @@ struct Frames {
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<relay::EncodedFrame> items;
-  bool publish(relay::EncodedFrame&& frame) {
-    { std::lock_guard<std::mutex> lock(mutex); items.push_back(std::move(frame)); }
+  bool publish(std::shared_ptr<const relay::EncodedFrame> frame) {
+    { std::lock_guard<std::mutex> lock(mutex); items.push_back(*frame); }
     changed.notify_all(); return true;
   }
   relay::EncodedFrame at(size_t index) {
@@ -104,7 +104,7 @@ static void decodedPixel(const relay::EncodedFrame& encoded, bool red, int width
 static const relay::CaptureSettings capture_settings{60, 1000000, 8000000, 40000000};
 static void healthySource() {
   auto state = std::make_shared<SourceState>(); Frames frames;
-  relay::CaptureEncoder encoder([&](relay::EncodedFrame&& f) { return frames.publish(std::move(f)); },
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame> f) { return frames.publish(std::move(f)); },
       capture_settings, [state] { return std::make_unique<CpuSource>(state); });
   std::string error;
   require(encoder.start(error), error.c_str());
@@ -137,7 +137,7 @@ static void runtimeSize(int width, int height, unsigned fps = 60) {
   auto state = std::make_shared<SourceState>(); Frames frames;
   auto settings = capture_settings;
   settings.fps = fps;
-  relay::CaptureEncoder encoder([&](relay::EncodedFrame&& frame) { return frames.publish(std::move(frame)); },
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame> frame) { return frames.publish(std::move(frame)); },
       settings, [state, width, height] { return std::make_unique<CpuSource>(state, width, height); });
   std::string error; require(encoder.start(error), error.c_str()); encoder.beginSession(20);
   const auto initial = frames.at(0);
@@ -164,7 +164,7 @@ static void runtimeSize(int width, int height, unsigned fps = 60) {
 }
 static void identicalDamageRefines() {
   auto state = std::make_shared<SourceState>(); Frames frames;
-  relay::CaptureEncoder encoder([&](relay::EncodedFrame&& frame) { return frames.publish(std::move(frame)); },
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame> frame) { return frames.publish(std::move(frame)); },
       capture_settings, [state] { return std::make_unique<CpuSource>(state); });
   std::string error; require(encoder.start(error), error.c_str()); encoder.beginSession(19);
   frames.at(0);
@@ -191,7 +191,7 @@ static void identicalDamageRefines() {
 static void invalidSource(int invalid) {
   auto state = std::make_shared<SourceState>(); state->invalid = invalid;
   std::atomic<unsigned> published{0};
-  relay::CaptureEncoder encoder([&](relay::EncodedFrame&&) { ++published; return true; },
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame>) { ++published; return true; },
       capture_settings, [state] { return std::make_unique<CpuSource>(state); });
   std::string error; require(encoder.start(error), error.c_str()); encoder.beginSession(1);
   const auto deadline = std::chrono::steady_clock::now() + 4s;
@@ -253,7 +253,7 @@ static void decodedStripes(const std::vector<relay::EncodedFrame>& sequence, int
 }
 static void fullScreenDamage(int width, int height) {
   auto state = std::make_shared<SourceState>(); Frames frames;
-  relay::CaptureEncoder encoder([&](relay::EncodedFrame&& f) { return frames.publish(std::move(f)); },
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame> f) { return frames.publish(std::move(f)); },
       capture_settings, [state, width, height] { return std::make_unique<StripeSource>(state, width, height); });
   std::string error; require(encoder.start(error), error.c_str()); encoder.beginSession(21);
   const auto initial = frames.at(0);

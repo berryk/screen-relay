@@ -38,6 +38,8 @@ clipboard(): Promise<string>                       // clipboard text, '' when it
 setClipboard(text): Promise<void>                  // UTF-8, up to 256 KiB; '' clears it
 ```
 
+`Capabilities` includes `encoder` (the active encoder's name), `hardware_encoder`, `encoder_state`, `rtc` (whether WebRTC is available), and `ice_servers` (how many are configured).
+
 ## connect
 
 `connect(options)` opens a control session that owns input until `close()`.

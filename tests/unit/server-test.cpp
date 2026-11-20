@@ -262,7 +262,8 @@ int main() {
   Config engine;
   const std::string defaultName = defaultBackend().name;
   assert(engineConfig({}, engine) && engine.backend == defaultName && engine.fps == 60 &&
-         engine.bitrate_min == 1000000 && engine.bitrate_start == 8000000 && engine.bitrate_max == 40000000);
+         engine.bitrate_min == 1000000 && engine.bitrate_start == 8000000 && engine.bitrate_max == 40000000 &&
+         engine.encoder == "auto");
   assert(engineConfig({"--backend", defaultName, "--output", "HDMI-A-1"}, engine) &&
          engine.backend == defaultName && engine.output == "HDMI-A-1");
   assert(engineConfig({"--check", "--viewer-dir", "build/missing-viewer"}, engine) && engine.check);
@@ -283,5 +284,51 @@ int main() {
   assert(!engineConfig({"--bitrate-max", "100000001"}, engine));
   assert(!engineConfig({"--bitrate-min", "9000000"}, engine));
   assert(!engineConfig({"--bitrate-start", "40000001"}, engine));
+  assert(engineConfig({"--encoder", "x264"}, engine) && engine.encoder == "x264");
+  assert(engineConfig({"--encoder", "nvenc_1"}, engine) && engine.encoder == "nvenc_1");
+  for (const std::string value : {"", "x264-hw", "x264 hw", "x264/hw", "x264#hw"}) {
+    error.clear();
+    assert(!engineConfig({"--encoder", value}, engine, &error));
+  }
+  {
+    IceServer server;
+    assert(parseIceServer("stun:stun.example.com", server) && server.raw == "stun:stun.example.com" && server.url == "stun:stun.example.com" &&
+           server.username.empty() && server.credential.empty());
+    assert(parseIceServer("stun:[2001:db8::1]:3478", server) && server.url == "stun:[2001:db8::1]:3478");
+    assert(parseIceServer("turn:relay.example.com:3478?transport=udp", server) && server.url == "turn:relay.example.com:3478?transport=udp");
+    assert(parseIceServer("turn:user:pass@relay.example.com:3478?transport=tcp", server) &&
+           server.url == "turn:relay.example.com:3478?transport=tcp" && server.username == "user" && server.credential == "pass");
+    assert(parseIceServer("turns:alice:secret@[2001:db8::1]:5349?transport=tcp", server) &&
+           server.url == "turns:[2001:db8::1]:5349?transport=tcp" && server.username == "alice" && server.credential == "secret");
+    for (const std::string spec : {"", "TURN:relay.example.com", "turn:user@relay.example.com", "turn::pass@relay.example.com",
+                                   "turn:user:pass@relay.example.com:0", "turn:user:pass@relay.example.com:65536",
+                                   "turn:user:pass@relay.example.com:080", "stun:user:pass@relay.example.com",
+                                   "turn:relay.example.com?transport=icmp", "turn:relay.example.com?transport=tcp&foo=bar",
+                                   "stun:relay.example.com?transport=udp", "turn:relay.example.com/path",
+                                   "turn:relay.example.com#frag", " turn:relay.example.com ",
+                                   "turn:user:pass@relay.example.com:3478?transport=tcp "}) {
+      IceServer invalid;
+      assert(!parseIceServer(spec, invalid));
+    }
+  }
+  {
+    Config ice;
+    std::string error;
+    assert(engineConfig({"--ice-server", "stun:stun.example.com", "--ice-server", "turn:user:pass@relay.example.com:3478?transport=tcp"}, ice, &error));
+    assert(ice.ice_servers.size() == 2);
+    assert(ice.ice_servers[0].url == "stun:stun.example.com");
+    assert(ice.ice_servers[1].url == "turn:relay.example.com:3478?transport=tcp");
+    assert(ice.ice_servers[1].username == "user" && ice.ice_servers[1].credential == "pass");
+    std::vector<std::string> many_ice_servers;
+    for (int index = 0; index < 8; ++index) {
+      many_ice_servers.push_back("--ice-server");
+      many_ice_servers.push_back("stun:stun" + std::to_string(index) + ".example.com");
+    }
+    assert(engineConfig(many_ice_servers, ice, &error) && ice.ice_servers.size() == 8);
+    many_ice_servers.push_back("--ice-server");
+    many_ice_servers.push_back("stun:overflow.example.com");
+    error.clear();
+    assert(!engineConfig(many_ice_servers, ice, &error));
+  }
   return 0;
 }

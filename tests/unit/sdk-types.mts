@@ -5,6 +5,13 @@ const checkTypes = async () => {
   const desktop = await connect({ url: 'http://127.0.0.1:18094', timeout: 5000 });
   const pixels: Uint8Array = await screenshot({ url: 'http://127.0.0.1:18094' });
   const width: number = (await capabilities()).width;
+  const encoder: string = (await capabilities()).encoder;
+  const hardwareEncoder: boolean = (await capabilities()).hardware_encoder;
+  const encoderState: string = (await capabilities()).encoder_state;
+  const rtc: boolean = (await capabilities()).rtc;
+  const iceServers: number = (await capabilities()).ice_servers;
+  // @ts-expect-error The encoder name is a string, not a number.
+  const numericEncoder: number = (await capabilities()).encoder;
   await capabilities({ url: 'https://127.0.0.1:18094', ca: 'ca.pem' });
   await capabilities({ url: 'https://127.0.0.1:18094', certificate: 'cert.pem' });
   await desktop.input({ type: 'pointerMove', x: 0.5, y: 0.5 });
@@ -15,6 +22,6 @@ const checkTypes = async () => {
   await desktop.input({ type: 'keyDown' });
   const error: Error = new RelayError('NETWORK_ERROR', 'Unavailable');
   desktop.close();
-  return { pixels, width, error };
+  return { pixels, width, encoder, hardwareEncoder, encoderState, rtc, iceServers, numericEncoder, error };
 };
 void checkTypes;

@@ -42,6 +42,8 @@ export type SessionArgs = HostArgs & {
   'tls-key'?: string;
   keyboardLayout?: string;
   compositor?: string;
+  encoder?: string;
+  'ice-server'?: string[];
 };
 
 type EngineTarget = { url: string; token?: string | null; certificate?: string | null; connect?: string | null };
@@ -341,6 +343,8 @@ export class Session {
     let token: string | null = null;
     const engineCommand = [engine, '--bind', bind, '--port', String(this.args.port), '--fps', String(this.args.fps), '--bitrate-min', String(this.args.bitrateMin), '--bitrate-start', String(this.args.bitrateStart), '--bitrate-max', String(this.args.bitrateMax)];
     engineCommand.push('--backend', backend);
+    if (this.args.encoder && this.args.encoder !== 'auto') engineCommand.push('--encoder', this.args.encoder);
+    for (const server of this.args['ice-server'] ?? []) engineCommand.push('--ice-server', server);
     const viewer = join(LAUNCHER_DIR, '..', 'viewer');
     if (!existsSync(join(dirname(engine), 'viewer')) && existsSync(join(viewer, 'viewer.js'))) engineCommand.push('--viewer-dir', viewer);
     if (this.args.output) engineCommand.push('--output', this.args.output);

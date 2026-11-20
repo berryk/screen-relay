@@ -52,7 +52,11 @@ export function parseCommand(argv: string[], environment: NodeJS.ProcessEnv = pr
         raw = separator < 0 ? argv[++index] : token.slice(separator + 1);
         if (raw === undefined || (typeof raw === 'string' && raw.startsWith('-') && raw !== '-' && !/^-\d/.test(raw))) throw usageFailure(`Option '${flag}' requires ${option.valueHint ?? 'a value'}.`, name);
       }
-      values[option.name] = raw;
+      if (option.repeat === 'collect') {
+        const collected = values[option.name];
+        if (Array.isArray(collected)) collected.push(raw);
+        else values[option.name] = [raw];
+      } else values[option.name] = raw;
     } else if (!name) {
       if (!Object.hasOwn(commands, token)) throw unknownToken('command', token, Object.keys(commands));
       name = token;
@@ -77,7 +81,8 @@ export function parseCommand(argv: string[], environment: NodeJS.ProcessEnv = pr
   if (early instanceof Failure) throw early;
   for (const parameter of [...globalOptions, ...command.options, ...command.arguments]) {
     const environmentValue = parameter.environment === 'SCREEN_RELAY_CONFIG' ? environment.SCREEN_RELAY_CONFIG || undefined : parameter.environment ? environment[parameter.environment] : undefined;
-    const raw = args[parameter.name] ?? environmentValue ?? (parameter.deferredDefault ? undefined : parameter.default);
+    let raw = args[parameter.name] ?? environmentValue ?? (parameter.deferredDefault ? undefined : parameter.default);
+    if (parameter.repeat === 'collect' && typeof raw === 'string') raw = raw.split(/\s+/).filter(Boolean);
     if (raw === undefined) {
       if (parameter.required) throw usageFailure(`Missing argument ${parameter.valueHint ?? parameter.name}.`, name, parameter.missingReason ?? 'missing_input');
       continue;

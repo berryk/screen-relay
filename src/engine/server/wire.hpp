@@ -47,6 +47,9 @@ ConnectionPlan connectionPlan(Socket socket, size_t viewerCount, bool streamOwns
  */
 bool frameMessage(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint32_t lastSequence, const EncodedFrame& frame,
                   uint16_t width, uint16_t height);
+/** Zero-copy NSL1 video builder using an explicit per-viewer sequence number for a shared EncodedFrame. */
+bool frameMessage(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint32_t lastSequence, uint32_t sequence,
+                  const EncodedFrame& frame, uint16_t width, uint16_t height);
 bool cursorMessage(std::vector<uint8_t>& out, size_t pre, uint32_t generation, const CursorImage& cursor);
 void controlReady(std::vector<uint8_t>& out, size_t pre, uint32_t generation, uint16_t width, uint16_t height);
 /** Tells a controlling /stream viewer that the desktop clipboard changed; it reads the text from /clipboard. */

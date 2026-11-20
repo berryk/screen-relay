@@ -54,6 +54,25 @@ test('--allow-origin takes exact HTTPS and loopback HTTP origins from the flag o
   }
 });
 
+test('--encoder and repeated --ice-server take validated values from flags and the environment', () => {
+  assert.equal(parseCommand(['up', '--encoder', 'x264'], {}).encoder, 'x264');
+  assert.equal(parseCommand(['up'], { SCREEN_RELAY_ENCODER: 'h264_videotoolbox' }).encoder, 'h264_videotoolbox');
+  assert.equal(parseCommand(['up'], {}).encoder, undefined);
+  for (const value of ['x-264', 'x 264', 'x264!']) {
+    assert.throws(() => parseCommand(['up', '--encoder', value], {}), /Invalid encoder/, value);
+    assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ENCODER: value }), /Invalid SCREEN_RELAY_ENCODER/, value);
+  }
+
+  const servers = ['stun:stun.example.com', 'turn:user:pass@turn.example.com:3478?transport=tcp'];
+  assert.deepEqual(parseCommand(['up', '--ice-server', servers[0], '--ice-server', servers[1]], {})['ice-server'], servers);
+  assert.deepEqual(parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: servers.join(' ') })['ice-server'], servers);
+  assert.throws(() => parseCommand(['up', '--ice-server', 'stun:user@stun.example.com'], {}), /Invalid ice-server/);
+  assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: 'stun:ok.example.com nope' }), /Invalid SCREEN_RELAY_ICE_SERVERS/);
+  const nine = Array.from({ length: 9 }, (_, index) => `stun:h${index}.example.com`);
+  assert.throws(() => parseCommand(['up', ...nine.flatMap((server) => ['--ice-server', server])], {}), /At most 8 --ice-server entries/);
+  assert.equal(parseCommand(['up', ...nine.slice(0, 8).flatMap((server) => ['--ice-server', server])], {})['ice-server'].length, 8);
+});
+
 test('an empty SCREEN_RELAY_CONFIG is treated as unset', () => {
   assert.equal(parseCommand(['up'], { SCREEN_RELAY_CONFIG: '' }).config, undefined);
 });
@@ -122,6 +141,52 @@ if (process.argv.includes('--help')) {
     mkdirSync(badDir, { recursive: true });
     session = new Session({ command: 'up', json: true, name: 'bad', port, output: 'invalid-output', resolution: '1280x720', fps: 60, bitrateMin: 1000000, bitrateStart: 8000000, bitrateMax: 40000000, timeout: 5 }, badDir);
     await assert.rejects(session.start(), { reason: 'component_failed', message: /Display invalid-output not found; active displays: 77/ });
+  } finally {
+    if (session) await session.cleanup();
+    rmSync(engine, { force: true });
+    if (platform) Object.defineProperty(process, 'platform', platform);
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test('up forwards the encoder and every ICE server to the engine', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const keys = ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'SCREEN_RELAY_ENCODER', 'SCREEN_RELAY_ICE_SERVERS'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const engine = join(directory, 'relay-engine');
+  const sessionDir = join(directory, 'encode-session');
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(engine, `#!/usr/bin/env node
+import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--help')) {
+  console.log('Compiled backends: macos');
+} else {
+  writeFileSync(process.env.SCREEN_RELAY_SESSION + '/engine-invocation.json', JSON.stringify({ args: process.argv.slice(2) }));
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+  createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'image/png' }); res.end(image); }).listen(port, '127.0.0.1', () => console.log(JSON.stringify({ ready: true, pid: process.pid })));
+}
+`, { mode: 0o755 });
+  let session;
+  try {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    Object.assign(process.env, { XDG_STATE_HOME: join(directory, 'encode-state'), XDG_CONFIG_HOME: join(directory, 'encode-config') });
+    for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'SCREEN_RELAY_ENCODER', 'SCREEN_RELAY_ICE_SERVERS']) delete process.env[key];
+    const probe = createServer();
+    await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const port = probe.address().port;
+    await new Promise((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+    const servers = ['stun:stun.example.com', 'turns:user:pass@turn.example.com:5349?transport=tcp'];
+    session = new Session({ command: 'up', json: true, name: 'encode', port, resolution: '1280x720', fps: 60, bitrateMin: 1000000, bitrateStart: 8000000, bitrateMax: 40000000, timeout: 5, encoder: 'x264', 'ice-server': servers }, sessionDir);
+    await session.start();
+    const { args } = JSON.parse(readFileSync(join(sessionDir, 'engine-invocation.json'), 'utf8'));
+    const encoder = args.indexOf('--encoder');
+    assert.deepEqual(args.slice(encoder, encoder + 2), ['--encoder', 'x264']);
+    assert.deepEqual(args.flatMap((value, index) => value === '--ice-server' ? [args[index + 1]] : []), servers);
   } finally {
     if (session) await session.cleanup();
     rmSync(engine, { force: true });
