@@ -29,6 +29,11 @@ BACKEND_PKGS = $(sort $(foreach backend,$(BACKENDS),$(BACKEND_PKGS_$(backend))))
 BACKEND_DIRS = $(sort $(foreach backend,$(BACKENDS),$(BACKEND_DIR_$(backend))))
 BACKEND_CPPFLAGS = $(foreach backend,$(sort $(BACKENDS)),-DRELAY_BACKEND_$(backend) $(BACKEND_FLAGS_$(backend)))
 CODEC_PKGS = x264
+HWENC ?= $(shell pkg-config --exists libavcodec libavutil && echo 1)
+ifeq ($(HWENC),1)
+CODEC_PKGS += libavcodec libavutil
+CPPFLAGS += -DRELAY_HWENC
+endif
 PKGS = $(sort $(BACKEND_PKGS) $(CODEC_PKGS) $(PLATFORM_PKGS) libwebsockets zlib)
 CPPFLAGS += -Isrc/engine $(BACKEND_CPPFLAGS) $(shell pkg-config --cflags $(PKGS))
 CXXFLAGS ?= -O2

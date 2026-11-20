@@ -20,6 +20,7 @@ struct EncodedFrame {
 
 struct CaptureStats {
   bool cursor_supported = false;
+  std::string encoder;
   uint64_t captures = 0;
   uint64_t encoded = 0;
   uint64_t capture_ns = 0;
@@ -30,6 +31,7 @@ struct CaptureStats {
 struct CaptureSettings {
   unsigned fps;
   uint64_t min_bitrate, start_bitrate, max_bitrate;
+  std::string encoder = "auto";
 };
 
 class CaptureEncoder {

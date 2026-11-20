@@ -19,8 +19,8 @@ type Request = { backends: Backend[]; display?: string; desktop?: string; keyboa
 type Plan = { state: 'ready' | 'needs-build' | 'needs-packages'; backends: Backend[]; build: boolean; groups: string[] };
 
 const SOURCE = resolve(LAUNCHER_DIR, '..', '..');
-const BREW_PACKAGES = ['pkgconf', 'x264', 'libwebsockets'];
-const MSYS2_PACKAGES = ['make', 'diffutils', 'mingw-w64-ucrt-x86_64-gcc', 'mingw-w64-ucrt-x86_64-pkgconf', 'mingw-w64-ucrt-x86_64-libwebsockets', 'mingw-w64-ucrt-x86_64-x264'];
+const BREW_PACKAGES = ['pkgconf', 'x264', 'libwebsockets', 'ffmpeg'];
+const MSYS2_PACKAGES = ['make', 'diffutils', 'mingw-w64-ucrt-x86_64-gcc', 'mingw-w64-ucrt-x86_64-pkgconf', 'mingw-w64-ucrt-x86_64-libwebsockets', 'mingw-w64-ucrt-x86_64-x264', 'mingw-w64-ucrt-x86_64-ffmpeg'];
 const WINGET_MSYS2 = ['install', '--id', 'MSYS2.MSYS2', '-e', '--silent', '--accept-package-agreements', '--accept-source-agreements'];
 const OPTIONAL_APT = ['glycin-loaders', 'gdk-pixbuf-bin'];
 

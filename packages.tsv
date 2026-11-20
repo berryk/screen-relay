@@ -2,6 +2,7 @@ core	compiler	build-essential	gcc-c++ make	base-devel	build-base
 core	pkg-config	pkg-config	pkgconf-pkg-config	pkgconf	pkgconf
 core	setpriv	util-linux	util-linux	util-linux	setpriv
 core	x264-dev	libx264-dev	x264-devel	x264	x264-dev
+core	avcodec-dev	libavcodec-dev	ffmpeg-free-devel	ffmpeg	ffmpeg-dev
 core	libwebsockets-dev	libwebsockets-dev	libwebsockets-devel	libwebsockets	libwebsockets-dev openssl-dev
 core	zlib-dev	zlib1g-dev	zlib-ng-compat-devel	zlib	zlib-dev
 core	linux-headers	-	-	-	linux-headers

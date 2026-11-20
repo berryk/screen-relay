@@ -71,7 +71,7 @@ Server::Stream::Stream(Server& server) : capture([this, &server](EncodedFrame&& 
   pending.push_back(std::move(frame));
   lws_cancel_service(server.context);
   return true;
-}, CaptureSettings{server.config.fps, server.config.bitrate_min, server.config.bitrate_start, server.config.bitrate_max},
+}, CaptureSettings{server.config.fps, server.config.bitrate_min, server.config.bitrate_start, server.config.bitrate_max, server.config.encoder},
 backendFor(server.config.backend).capture, [this, &server](uint32_t gen, CursorImage&& cursor) {
   std::lock_guard<std::mutex> lock(mutex);
   if (!generation || gen != generation) return;
@@ -576,6 +576,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
             "\"screenshot\":\"/screenshot.png\",\"control\":\"/control\",\"wayland\":" +
             (backend == "wayland" ? "true" : "false") +
             ",\"max_input_pending\":32,\"cursor\":" + (s->streams[0]->capture.stats().cursor_supported ? "true" : "false") +
+            ",\"encoder\":\"" + s->streams[0]->capture.stats().encoder + "\"" +
             ",\"input_endpoint\":\"/input\",\"max_input_batch\":" + std::to_string(max_input_batch) +
             ",\"audio\":false,\"clipboard\":" + (s->clipboard.available() ? "true" : "false") +
             ",\"clipboard_endpoint\":\"/clipboard\",\"max_clipboard_bytes\":" + std::to_string(max_clipboard_bytes) +

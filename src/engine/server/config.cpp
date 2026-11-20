@@ -282,7 +282,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
     const std::string option = argv[i];
     if (option == "--help") {
       std::cout << "Usage: relay-engine [--bind ADDRESS] [--port PORT] [--viewer-dir DIR]\n"
-                   "  [--backend NAME] [--output NAME] [--check]\n"
+                   "  [--backend NAME] [--output NAME] [--encoder auto|x264|NAME] [--check]\n"
                    "  [--fps N] [--bitrate-min BPS] [--bitrate-start BPS] [--bitrate-max BPS]\n"
                    "  [--token-file FILE [--public-origin https://HOST[:PORT]]\n"
                    "    [--allow-origin ORIGIN[,...]]]\n"
@@ -297,7 +297,8 @@ bool parseConfig(int argc, char** argv, Config& config) {
                    "http://127.0.0.1[:PORT] for a page served on the machine itself.\n"
                    "--check initializes the backend and exits without starting capture or the server.\n"
                    "Attach to DISPLAY using the caller's XAUTHORITY. Defaults: 127.0.0.1:8080, 60 fps,\n"
-                   "1000000/8000000/40000000 bps.\n"
+                   "1000000/8000000/40000000 bps, encoder auto (the first hardware H.264 encoder\n"
+                   "that works, else x264).\n"
                 << "Compiled backends: " << backendNames() << '\n';
       return false;
     }
@@ -309,6 +310,11 @@ bool parseConfig(int argc, char** argv, Config& config) {
     if (option == "--bind") config.bind = value;
     else if (option == "--backend") config.backend = value;
     else if (option == "--output") config.output = value;
+    else if (option == "--encoder") {
+      if (value.empty() || value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos)
+        throw std::runtime_error("Encoder must be auto, x264, or a libavcodec encoder name");
+      config.encoder = value;
+    }
     else if (option == "--port") {
       uint64_t port;
       if (!unsignedNumber(value, port) || !port || port > 65535) throw std::runtime_error("Invalid port");

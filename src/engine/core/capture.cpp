@@ -4,6 +4,7 @@
 #include "flow.hpp"
 #include "capture-source.hpp"
 #include "cpu-budget.hpp"
+#include "hwenc.hpp"
 #include "wait.hpp"
 
 #include <cstdint>
@@ -107,6 +108,9 @@ struct Resources {
   CaptureSettings settings;
   x264_t* codec = nullptr;
   x264_picture_t frame{};
+  std::unique_ptr<HwEncoder> hw;
+  uint8_t* planes[2] = {};
+  int strides[2] = {};
   std::vector<uint8_t> mb_info;
   int threads;
   std::vector<std::vector<uint8_t>> scratch;
@@ -148,10 +152,23 @@ struct Resources {
     wide_vbv = true;
   }
   void init() {
+    if (settings.encoder != "x264") hw = HwEncoder::open(settings.encoder, width, height, settings.fps, settings.start_bitrate);
+    if (hw) {
+      for (int plane = 0; plane < 2; ++plane) { planes[plane] = hw->plane(plane); strides[plane] = hw->stride(plane); }
+      return;
+    }
+    useSoftware();
+  }
+  /** Switches to x264; the next frame must be an IDR because the new planes start empty. */
+  void useSoftware() {
+    hw.reset();
     openEncoder();
-    require(x264_picture_alloc(&frame, X264_CSP_NV12, width, height) == 0,
-            "allocating YUV buffer failed");
-    frame_allocated = true;
+    if (!frame_allocated) {
+      require(x264_picture_alloc(&frame, X264_CSP_NV12, width, height) == 0, "allocating YUV buffer failed");
+      frame_allocated = true;
+      std::fprintf(stderr, "encoder: x264\n");
+    }
+    for (int plane = 0; plane < 2; ++plane) { planes[plane] = frame.img.plane[plane]; strides[plane] = frame.img.i_stride[plane]; }
   }
   bool convertDamage(const FrameView& view, const std::vector<DamageRect>& rects) {
     const int columns = (width + 15) / 16;
@@ -200,14 +217,14 @@ struct Resources {
           bool different = false;
           for (int plane = 0; plane < 2; ++plane) {
             const int lines = plane ? (y1 - y0) / 2 : y1 - y0;
-            uint8_t* target = frame.img.plane[plane] + (plane ? y0 / 2 : y0) * frame.img.i_stride[plane] + left;
+            uint8_t* target = planes[plane] + (plane ? y0 / 2 : y0) * strides[plane] + left;
             const uint8_t* source = buffer.data() + (plane ? width * 16 : 0) + left - x0;
             for (int line = 0; line < lines; ++line) {
               if (std::memcmp(target, source, right - left) != 0) {
                 std::memcpy(target, source, right - left);
                 different = true;
               }
-              target += frame.img.i_stride[plane];
+              target += strides[plane];
               source += width;
             }
           }
@@ -257,7 +274,8 @@ struct CaptureEncoder::Impl {
       Resources r(format, width, height, settings);
       r.init();
       { std::lock_guard<std::mutex> lock(mutex);
-        counters.cursor_supported = source->cursorSupported(); initialized = true; running = true;
+        counters.cursor_supported = source->cursorSupported(); counters.encoder = r.hw ? r.hw->name() : "x264";
+        initialized = true; running = true;
       }
       ready.notify_all();
       bool dirty = true, force_idr = true;
@@ -320,6 +338,7 @@ struct CaptureEncoder::Impl {
           bool refinement = !dirty;
           const bool captured_frame = !refinement;
           const auto capture_start = Clock::now();
+          bool encoder_failed = false;
           try {
             assert(!refinement || (!force_idr && last_pts >= 0));
             dirty = false;
@@ -337,8 +356,8 @@ struct CaptureEncoder::Impl {
               bool changed = true;
               if (force_idr) {
                 const auto convert = view.format == PixelFormat::BGRA ? bgraToNv12 : argbToNv12;
-                require(convert(view.data, view.stride, r.frame.img.plane[0], r.frame.img.i_stride[0],
-                                r.frame.img.plane[1], r.frame.img.i_stride[1], view.width, view.height),
+                require(convert(view.data, view.stride, r.planes[0], r.strides[0],
+                                r.planes[1], r.strides[1], view.width, view.height),
                         "RGB conversion failed");
               } else {
                 if (!source->changedRects(rects)) rects = {{view.x, view.y, view.width, view.height}};
@@ -361,34 +380,44 @@ struct CaptureEncoder::Impl {
               }
             }
             const int64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(capture_start.time_since_epoch()).count();
-            r.frame.i_pts = last_pts = std::max(last_pts + 1, timestamp);
-            const bool wide_vbv = refinement || force_idr;
-            if (rate != r.bitrate || wide_vbv != r.wide_vbv) {
-              x264_param_t params;
-              x264_encoder_parameters(r.codec, &params);
-              params.rc.i_vbv_max_bitrate = int(rate / 1000);
-              params.rc.i_vbv_buffer_size = vbvBufferKbit(rate, settings.fps, wide_vbv);
-              require(x264_encoder_reconfig(r.codec, &params) == 0, "encoder reconfiguration failed");
-              r.bitrate = rate;
-              r.wide_vbv = wide_vbv;
-            }
-            r.frame.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
-            r.frame.prop.mb_info = nullptr; r.frame.prop.mb_info_free = nullptr;
-            if (!refinement && !force_idr) r.frame.prop.mb_info = r.mb_info.data();
-            x264_nal_t* nals = nullptr;
-            int nal_count = 0;
-            x264_picture_t picture;
-            const int size = x264_encoder_encode(r.codec, &nals, &nal_count, &r.frame, &picture);
-            require(size > 0 && nal_count > 0 && nals && picture.i_pts == last_pts &&
-                    static_cast<size_t>(size) <= FlowControl::max_bytes,
-                    "invalid or delayed encoded access unit");
-            const bool converged = refinement && picture.prop.f_crf_avg <= encoder_crf + 1 &&
-                                   uint64_t(size) <= rate / (4ull * settings.fps);
+            last_pts = std::max(last_pts + 1, timestamp);
             EncodedFrame output;
             output.generation = gen; output.sequence = seq; output.pts_us = last_pts;
             output.width = uint16_t(width); output.height = uint16_t(height);
-            output.keyframe = picture.b_keyframe;
-            output.annex_b.assign(nals[0].p_payload, nals[0].p_payload + size);
+            bool converged;
+            if (r.hw) {
+              try { output.keyframe = r.hw->encode(last_pts, force_idr, rate, output.annex_b); }
+              catch (const std::exception&) { encoder_failed = true; throw; }
+              require(output.annex_b.size() <= FlowControl::max_bytes, "encoded access unit too large");
+              converged = refinement && output.annex_b.size() <= rate / (4ull * settings.fps);
+            } else {
+              r.frame.i_pts = last_pts;
+              const bool wide_vbv = refinement || force_idr;
+              if (rate != r.bitrate || wide_vbv != r.wide_vbv) {
+                x264_param_t params;
+                x264_encoder_parameters(r.codec, &params);
+                params.rc.i_vbv_max_bitrate = int(rate / 1000);
+                params.rc.i_vbv_buffer_size = vbvBufferKbit(rate, settings.fps, wide_vbv);
+                require(x264_encoder_reconfig(r.codec, &params) == 0, "encoder reconfiguration failed");
+                r.bitrate = rate;
+                r.wide_vbv = wide_vbv;
+              }
+              r.frame.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
+              r.frame.prop.mb_info = nullptr; r.frame.prop.mb_info_free = nullptr;
+              if (!refinement && !force_idr) r.frame.prop.mb_info = r.mb_info.data();
+              x264_nal_t* nals = nullptr;
+              int nal_count = 0;
+              x264_picture_t picture;
+              const int size = x264_encoder_encode(r.codec, &nals, &nal_count, &r.frame, &picture);
+              require(size > 0 && nal_count > 0 && nals && picture.i_pts == last_pts &&
+                      static_cast<size_t>(size) <= FlowControl::max_bytes,
+                      "invalid or delayed encoded access unit");
+              converged = refinement && picture.prop.f_crf_avg <= encoder_crf + 1 &&
+                          uint64_t(size) <= rate / (4ull * settings.fps);
+              output.keyframe = picture.b_keyframe;
+              output.annex_b.assign(nals[0].p_payload, nals[0].p_payload + size);
+            }
+            const size_t size = output.annex_b.size();
             require(!force_idr || (output.keyframe &&
                     hasNal(output.annex_b, 5) && hasNal(output.annex_b, 7) && hasNal(output.annex_b, 8)),
                     "encoder buffered frame or omitted IDR/SPS/PPS");
@@ -441,7 +470,12 @@ struct CaptureEncoder::Impl {
             if (++consecutive_failures >= 3) {
               throw std::runtime_error(std::string("capture failed three consecutive times: ") + error.what());
             }
-            r.openEncoder();
+            if (encoder_failed) {
+              std::fprintf(stderr, "capture: %s failed; switching to x264\n", r.hw->name().c_str());
+              HwEncoder::disable();
+              r.useSoftware();
+              { std::lock_guard<std::mutex> lock(mutex); counters.encoder = "x264"; }
+            } else if (!r.hw) r.openEncoder();
             retry_after = Clock::now() + std::chrono::seconds(1);
           }
           continue;
