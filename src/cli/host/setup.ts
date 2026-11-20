@@ -11,7 +11,7 @@ import { engineDirectory, isLinux, LAUNCHER_DIR, requireHost, run, which, type H
 import { detectFamily, groupPackages, installCommand, packagesFor, provides } from './packages.js';
 import { claimLock, lockOwnerAlive } from './state.js';
 import { compiledBackends, findEngine, requestedBackend, sessionNeeds } from './supervisor.js';
-import { createPrivateMsys2Root, forgetMsys2Installation, MSYS2_PATH, MSYS2_ROOT, msys2Failure, msys2Installation, msys2Shell, wingetPath } from './windows.js';
+import { createPrivateMsys2Root, forgetMsys2Installation, MSYS2_PATH, MSYS2_ROOT, msys2Failure, msys2Installation, msys2Libraries, msys2Shell, wingetPath } from './windows.js';
 
 type Backend = (typeof BACKENDS)[number];
 type Args = HostArgs & Record<string, any>;
@@ -55,7 +55,7 @@ export function planSetup(request: Request): Plan {
   const backends = BACKENDS.filter((backend) => compiled.includes(backend) || request.backends.includes(backend));
   const programs = request.backends.flatMap((backend) => sessionNeeds(backend, request).missing)
     .filter((program) => provides(program === 'swaymsg' ? 'sway' : program));
-  const untrusted = process.platform === 'win32' && msys2Installation().state === 'untrusted';
+  const untrusted = process.platform === 'win32' && msys2Libraries().state === 'untrusted';
   const packages = programs.length > 0 || untrusted || (build && !buildable(backends));
   const xfce = request.backends.includes('x11') && sessionNeeds('x11', request).desktop === 'xfce';
   const groups = ['core', ...backends, ...(xfce ? ['xfce'] : [])];
@@ -136,7 +136,7 @@ function packageWork(groups: string[], args: Args): { manager: string; packages:
           }
           const installed = msys2Installation();
           if (installed.state !== 'trusted') {
-            if (discardRoot()) throw msys2Failure({ state: 'missing', root: MSYS2_ROOT });
+            if (discardRoot()) throw new Failure('missing_dependency', 'winget reported success but did not install MSYS2', 'Install MSYS2 with the manual steps at https://screen-relay.dev/docs/windows#install-msys2-manually, then run screen-relay install again.');
             throw msys2Failure(installed);
           }
         }

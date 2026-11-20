@@ -196,7 +196,7 @@ test('an MSYS2 path that is a reparse point is refused', () => {
 test('an MSYS2 tree with a loose rule gets a delete-and-reinstall fix without icacls', () => {
   const fix = msys2Fix({ state: 'untrusted', root: 'C:\\msys64', reason: 'C:\\msys64 lets BUILTIN\\Users write to it.' });
   assert.match(fix, /lets BUILTIN\\Users write to it\./);
-  assert.match(fix, /Delete C:\\msys64 and run screen-relay install again/);
+  assert.match(fix, /uninstall it with C:\\msys64\\uninstall\.exe or winget uninstall MSYS2\.MSYS2\. Then delete what is left of C:\\msys64 and run screen-relay install again/);
   assert.ok(!fix.includes('icacls'));
   assert.ok(!fix.includes('`'));
 });
@@ -204,7 +204,7 @@ test('an MSYS2 tree with a loose rule gets a delete-and-reinstall fix without ic
 test('an MSYS2 tree owned by another account gets the same delete-and-reinstall fix', () => {
   const fix = msys2Fix({ state: 'untrusted', root: 'C:\\msys64', reason: 'C:\\msys64 is owned by DESKTOP\\other.' });
   assert.match(fix, /is owned by DESKTOP\\other\./);
-  assert.match(fix, /Delete C:\\msys64 and run screen-relay install again/);
+  assert.match(fix, /uninstall it with C:\\msys64\\uninstall\.exe or winget uninstall MSYS2\.MSYS2\. Then delete what is left of C:\\msys64 and run screen-relay install again/);
   assert.ok(!fix.includes('icacls'));
 });
 
@@ -486,6 +486,7 @@ for (let i = 0; i < 2; i++) {
     assert.equal(calls, mode === 'preexisting' ? 0 : mode === 'partial' ? 1 : 2, mode);
     assert.equal(existsSync(msysRoot), mode === 'partial' || mode === 'preexisting', mode);
     if (mode === 'partial') assert.match(errors[0].hint, /incomplete installation/);
+    if (mode === 'missing-shell') assert.match(errors[0].hint, /install-msys2-manually/);
   }
 });
 

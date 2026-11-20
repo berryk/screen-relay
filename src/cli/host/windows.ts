@@ -30,6 +30,9 @@ const CREATOR_SIDS = new Set(['S-1-3-0', 'S-1-3-1', 'S-1-3-4']);
 /** The decision this process made about the MSYS2 installation, so setup checks the tree once rather than for every step. */
 let installation: Msys2Installation | undefined;
 
+/** The decision this process made about the UCRT64 libraries that relay-engine loads, so starting the engine checks them once. */
+let libraries: Msys2Installation | undefined;
+
 /** One access rule as PowerShell reports it: the trustee's security identifier, its account name, and the rights it is granted. */
 export type AclRule = { sid: string; name: string; rights: number };
 
@@ -50,7 +53,7 @@ export type Msys2Problem = Exclude<Msys2Installation, { state: 'trusted' }>;
 
 /** The environment that runs relay-engine, with MSYS2's UCRT64 libraries first on PATH on Windows. Other platforms get the environment unchanged. */
 export function engineEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  if (process.platform !== 'win32' || msys2Installation().state !== 'trusted') return env;
+  if (process.platform !== 'win32' || msys2Libraries().state !== 'trusted') return env;
   const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH';
   return { ...env, [key]: [MSYS2_LIBRARIES, env[key]].filter(Boolean).join(';') };
 }
@@ -62,13 +65,20 @@ export function engineWorkingDirectory(engine: string): string | undefined {
 
 /** The MSYS2 installation on this machine, decided once per process. Call forgetMsys2Installation after setup changes the tree. */
 export function msys2Installation(): Msys2Installation {
-  installation ??= detectMsys2();
+  installation ??= detectMsys2(MSYS2_SHELL, MSYS2_ROOT);
   return installation;
 }
 
-/** Drops the remembered decision, so the next check reads the installation again. */
+/** The MSYS2 installation as relay-engine uses it: only the UCRT64 libraries and the directories above them are checked, so running the engine does not read the whole tree. Use msys2Installation before running the MSYS2 shell. */
+export function msys2Libraries(): Msys2Installation {
+  libraries ??= installation ?? detectMsys2(MSYS2_LIBRARIES, MSYS2_LIBRARIES);
+  return libraries;
+}
+
+/** Drops the remembered decisions, so the next check reads the installation again. */
 export function forgetMsys2Installation(): void {
   installation = undefined;
+  libraries = undefined;
 }
 
 /** MSYS2's bash, after checking that setup trusts the installation it comes from. */
@@ -84,9 +94,9 @@ export function msys2Failure(found: Msys2Problem): Failure {
   return new Failure('missing_dependency', 'MSYS2 is not installed', 'Run screen-relay install to create and install MSYS2 with the access rules it checks.');
 }
 
-/** The fix for an MSYS2 tree that setup will not run: delete it so setup can install a fresh copy. */
+/** The fix for an MSYS2 tree that setup will not run: uninstall it so winget does not treat it as installed, delete what is left, and let setup install a fresh copy. */
 export function msys2Fix(found: Extract<Msys2Installation, { state: 'untrusted' }>): string {
-  return `${found.reason} Back up any files you need. Delete ${found.root} and run screen-relay install again.`;
+  return `${found.reason} Back up any files you need. If MSYS2 is installed there, uninstall it with ${found.root}\\uninstall.exe or winget uninstall MSYS2.MSYS2. Then delete what is left of ${found.root} and run screen-relay install again.`;
 }
 
 /** Whether the signed-in account, SYSTEM, Administrators, or TrustedInstaller owns every MSYS2 path that setup runs or loads, and no other account can write to it. */
@@ -103,11 +113,11 @@ export function trustedAcl(probe: AclProbe): { trusted: true } | { trusted: fals
   return { trusted: true };
 }
 
-/** Reads what the machine has at the MSYS2 root and whether setup trusts the shell it would run. */
-function detectMsys2(): Msys2Installation {
+/** Reads what the machine has at the MSYS2 root and whether setup trusts the required path and everything under scope. */
+function detectMsys2(required: string, scope: string): Msys2Installation {
   if (!existsSync(MSYS2_ROOT)) return { state: 'missing', root: MSYS2_ROOT };
-  if (!existsSync(MSYS2_SHELL)) return { state: 'untrusted', root: MSYS2_ROOT, reason: `${MSYS2_ROOT} does not contain the MSYS2 shell.` };
-  const probe = probeMsys2Tree(MSYS2_ROOT, MSYS2_SHELL);
+  if (!existsSync(required)) return { state: 'untrusted', root: MSYS2_ROOT, reason: `${required} is missing.` };
+  const probe = probeMsys2Tree(MSYS2_ROOT, required, scope);
   if (!probe) return { state: 'untrusted', root: MSYS2_ROOT, reason: `screen-relay could not read the owner and access rules of ${MSYS2_ROOT}.` };
   const verdict = trustedAcl(probe);
   return verdict.trusted
@@ -170,14 +180,15 @@ export function createPrivateMsys2Root(root = MSYS2_ROOT): (() => boolean) | nul
   return discard;
 }
 
-/** Reads representative owner and allow rules for the MSYS2 tree without following reparse points. */
-export function probeMsys2Tree(root = MSYS2_ROOT, requiredPath?: string): AclProbe | null {
+/** Reads representative owner and allow rules for the MSYS2 tree without following reparse points. Only scope, everything under it, and the directories above it are read. */
+export function probeMsys2Tree(root = MSYS2_ROOT, requiredPath?: string, scope = root): AclProbe | null {
   const literal = (path: string) => `'${path.replaceAll("'", "''")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
     '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
     `$root = ${literal(root)}`,
     `$required = ${requiredPath ? literal(requiredPath) : '$null'}`,
+    `$scope = ${literal(`${scope}\\`)}`,
     '$stack = New-Object System.Collections.Stack',
     '$stack.Push((Get-Item -LiteralPath $root -Force))',
     '$sections = [System.Security.AccessControl.AccessControlSections] "Access,Owner"',
@@ -190,7 +201,10 @@ export function probeMsys2Tree(root = MSYS2_ROOT, requiredPath?: string): AclPro
     '    [pscustomobject]@{ path = $path; directory = $isDirectory; reparse = $true }',
     '    continue',
     '  }',
-    '  if ($isDirectory) { foreach ($child in (Get-ChildItem -LiteralPath $path -Force)) { $stack.Push($child) } }',
+    '  if ($isDirectory) { foreach ($child in (Get-ChildItem -LiteralPath $path -Force)) {',
+    "    $inside = $child.FullName + '\\'",
+    '    if ($inside.StartsWith($scope, [StringComparison]::OrdinalIgnoreCase) -or $scope.StartsWith($inside, [StringComparison]::OrdinalIgnoreCase)) { $stack.Push($child) }',
+    '  } }',
     '  $acl = if ($isDirectory) { [System.IO.Directory]::GetAccessControl($path, $sections) } else { [System.IO.File]::GetAccessControl($path, $sections) }',
     '  $key = "$isDirectory|" + $acl.GetSecurityDescriptorSddlForm($sections)',
     '  if ($seen.ContainsKey($key) -and $path -ne $required) { continue }',
