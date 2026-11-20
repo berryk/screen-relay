@@ -296,5 +296,10 @@ int main() {
   assert(!engineConfig({"--bitrate-max", "100000001"}, engine));
   assert(!engineConfig({"--bitrate-min", "9000000"}, engine));
   assert(!engineConfig({"--bitrate-start", "40000001"}, engine));
+  assert(engineConfig({"--encoder", "x264"}, engine) && engine.encoder == "x264");
+  assert(engineConfig({"--encoder", "nvenc_1"}, engine) && engine.encoder == "nvenc_1");
+  for (const std::string value : {"", "x264-hw", "x264 hw", "x264/hw", "x264#hw"}) {
+    assert(!engineConfig({"--encoder", value}, engine));
+  }
   return 0;
 }
