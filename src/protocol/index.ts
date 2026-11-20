@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import { RelayError } from './errors.js';
 export { RelayError, ERROR_REASONS, networkError, responseError } from './errors.js';
 export type { ErrorClass, ErrorReason, ErrorOptions, NextCommand } from './errors.js';

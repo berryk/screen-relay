@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import { writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';

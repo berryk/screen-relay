@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Agent as HttpAgent } from 'node:http';
