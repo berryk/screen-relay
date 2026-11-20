@@ -1,0 +1,98 @@
+name: Vercel Sandbox image
+
+# Builds images/vercel-sandbox and, on main, publishes it to the Vercel
+# Container Registry. Needs two repository variables: VERCEL_TEAM_ID, the team
+# whose OIDC policy trusts this repository, and VCR_IMAGE, the image's path in
+# that team (<team-slug>/<project-slug>/<repository>). The base image is pulled
+# from VCR too, so the build also needs the login.
+
+# The Dockerfile copies the whole checkout, so every change can reach the image
+# except paths .dockerignore leaves out.
+on:
+  pull_request:
+    paths-ignore:
+      - docs/**
+      - experiments/**
+      - .context/**
+  push:
+    branches: [main]
+    paths-ignore:
+      - docs/**
+      - experiments/**
+      - .context/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Build and publish
+    if: vars.VERCEL_TEAM_ID != '' && vars.VCR_IMAGE != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: vcr.vercel.com/${{ vars.VCR_IMAGE }}
+      PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to VCR with OIDC
+        uses: vercel/vcr-action/login@v1
+        with:
+          team: ${{ vars.VERCEL_TEAM_ID }}
+
+      - name: Build
+        run: |
+          docker build --platform linux/amd64 -f images/vercel-sandbox/Dockerfile \
+            -t "$IMAGE:staging-$GITHUB_RUN_ID" .
+
+      - name: Push a staging tag
+        if: env.PUBLISH == 'true'
+        run: docker push "$IMAGE:staging-$GITHUB_RUN_ID"
+
+      - name: Wait for image optimization
+        if: env.PUBLISH == 'true'
+        id: optimized
+        uses: vercel/vcr-action/wait-for-optimized-image@v1
+        timeout-minutes: 11
+        with:
+          image: ${{ env.IMAGE }}:staging-${{ github.run_id }}
+          timeout-seconds: 600
+
+      - name: Tag the optimized image with the version and latest
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.optimized.outputs.digest }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "package.json has an invalid version: $VERSION" >&2
+            exit 1
+          fi
+          # package.json only changes in release PRs, so a published version
+          # keeps its image, as release.yml skips versions npm already has.
+          # Only a clear not-found means unpublished: a registry error must not
+          # overwrite a released version.
+          tags=(latest)
+          if inspect=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1); then
+            echo "$IMAGE:$VERSION is already published; moving only latest."
+          elif grep -qiE 'not found|manifest unknown' <<<"$inspect"; then
+            tags=("$VERSION" latest)
+          else
+            echo "Could not check whether $IMAGE:$VERSION is published: $inspect" >&2
+            exit 1
+          fi
+          for tag in "${tags[@]}"; do
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$IMAGE:$tag" "$IMAGE@$DIGEST"
+          done
