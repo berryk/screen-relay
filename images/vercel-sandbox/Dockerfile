@@ -11,10 +11,15 @@ ENV HOME=/root
 # Keep npm from reading /vercel/.npmrc as project config.
 WORKDIR /
 
+# SOURCE_REVISION is the screen-relay commit the image is built from, named in
+# the image's license notes. The first step fails without it.
+ARG SOURCE_REVISION
+
 # Install screen-relay from this checkout, so the image matches the commit.
 # The checkout is also kept as a tarball, the source of the prebuilt engine.
 COPY . /opt/relay-src
-RUN mkdir -p /usr/share/doc/screen-relay/source && \
+RUN : "${SOURCE_REVISION:?pass --build-arg SOURCE_REVISION=\$(git rev-parse HEAD)}" && \
+    mkdir -p /usr/share/doc/screen-relay/source && \
     tar -czf /usr/share/doc/screen-relay/source/screen-relay.tar.gz \
       -C /opt/relay-src --exclude=./node_modules --exclude=./dist . && \
     cd /opt/relay-src && \
@@ -46,12 +51,10 @@ RUN screen-relay install --yes && \
 # screen-relay's own source is Apache-2.0. The image carries what GPL-3.0 asks
 # of a binary: the license texts, x264's license and copyright notices, and the
 # exact source of both in source/ (x264's from apt-get source), so no pointer
-# can go stale. SOURCE_REVISION is the screen-relay commit the image is built
-# from; the build fails without it.
-ARG SOURCE_REVISION
+# can go stale. deb-src is on only for that fetch, so the shipped image's apt
+# doesn't pull source indexes.
 USER root
 RUN set -eu; \
-    : "${SOURCE_REVISION:?pass --build-arg SOURCE_REVISION=\$(git rev-parse HEAD)}"; \
     relay="$(HOME=/root npm root -g)/screen-relay"; \
     version=$(node -p "require('$relay/package.json').version"); \
     doc=/usr/share/doc/screen-relay; \
@@ -66,14 +69,20 @@ RUN set -eu; \
       ubuntu) x264_url="https://launchpad.net/ubuntu/+source/$x264_name/$x264_version" ;; \
       *) x264_url="https://snapshot.debian.org/package/$x264_name/$x264_version/" ;; \
     esac; \
+    apt_orig=$(mktemp -d); \
     for list in /etc/apt/sources.list.d/*.sources; do \
-      [ -f "$list" ] && sed -i 's/^Types: deb$/Types: deb deb-src/' "$list"; \
+      [ -f "$list" ] && cp "$list" "$apt_orig/" && sed -i 's/^Types: deb$/Types: deb deb-src/' "$list"; \
     done; \
     [ ! -f /etc/apt/sources.list ] || sed -n 's/^deb /deb-src /p' /etc/apt/sources.list > /etc/apt/sources.list.d/src.list; \
     apt-get update -o Acquire::Retries=10 >/dev/null; \
     fetch=$(mktemp -d); chown _apt "$fetch"; \
     (cd "$fetch" && apt-get source --download-only -o Acquire::Retries=10 "$x264_name=$x264_version" >/dev/null); \
     mv "$fetch"/* "$doc/source/"; rmdir "$fetch"; \
+    for orig in "$apt_orig"/*.sources; do \
+      [ -f "$orig" ] && mv "$orig" /etc/apt/sources.list.d/; \
+    done; \
+    rmdir "$apt_orig"; rm -f /etc/apt/sources.list.d/src.list; \
+    grep -h '^Types:' /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
     rm -rf /var/lib/apt/lists/*; \
     ls "$doc/source"/*.dsc >/dev/null; \
     printf '%s\n' \
