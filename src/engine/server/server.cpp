@@ -398,7 +398,10 @@ int responseHeaders(lws* wsi, unsigned status, const char* mime, size_t length) 
   unsigned char* start = buffer+LWS_PRE;
   unsigned char* next = start;
   unsigned char* end = buffer+sizeof(buffer);
+  const bool sdp = !std::strcmp(mime, "application/sdp");
   if (lws_add_http_common_headers(wsi, status, mime, length, &next, end) ||
+      (sdp && lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>("location:"),
+                                          reinterpret_cast<const unsigned char*>("/rtc/session"), 12, &next, end)) ||
       lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>("cache-control:"),
                                   reinterpret_cast<const unsigned char*>("no-store"), 8, &next, end) ||
       lws_add_http_header_by_token(wsi, WSI_TOKEN_CONNECTION,
@@ -459,6 +462,26 @@ int clipboardWrite(lws* wsi, HttpResponse* response, Server* s) {
   if (!s->clipboard.submit(wsi, std::move(text))) return errorResponse(wsi, response, HTTP_STATUS_SERVICE_UNAVAILABLE, "clipboard_busy");
   return 0;
 }
+#ifdef RELAY_RTC
+/** Answers a WebRTC offer with a new session, replacing any earlier one; the answer SDP goes out through the chunked body path. */
+int rtcOffer(lws* wsi, HttpResponse* response, Server* s) {
+  std::string offer = std::move(*response->upload);
+  const bool complete = offer.size() == response->upload_expected;
+  delete response->upload; response->upload = nullptr; response->rtc_offer = false;
+  if (!complete) return -1;
+  s->rtc.reset();
+  auto session = std::make_shared<RtcSession>(CaptureSettings{s->config.fps, s->config.bitrate_min, s->config.bitrate_start, s->config.bitrate_max},
+                                              backendFor(s->config.backend).capture, s->context);
+  std::string answer, error;
+  if (!session->answer(offer, answer, error)) return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, error.c_str());
+  s->rtc = std::move(session);
+  response->image = new std::vector<uint8_t>(answer.begin(), answer.end());
+  response->image_status = 201; response->image_type = "application/sdp";
+  response->image_headers = false; response->offset = 0;
+  lws_callback_on_writable(wsi);
+  return 0;
+}
+#endif
 int metricsResponse(lws* wsi, HttpResponse* response, Server* server) {
   if (!response) return -1;
   std::string json;
@@ -495,6 +518,35 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         if (s->holdsInput()) return errorResponse(wsi, response, HTTP_STATUS_CONFLICT, "busy");
         response->input_length = 0; response->input_expected = length; return 0;
       }
+#ifdef RELAY_RTC
+      if (path == "/rtc") {
+        if (!response) return -1;
+        if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) <= 0) {
+          return errorResponse(wsi, response, HTTP_STATUS_METHOD_NOT_ALLOWED, "method_not_allowed");
+        }
+        if (!localRequest(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_FORBIDDEN, "forbidden");
+        if (!authenticated(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_UNAUTHORIZED, "unauthorized");
+        uint64_t length = 0;
+        if (!unsignedNumber(header(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH), length) || !length || length > 65536) {
+          return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_offer");
+        }
+        response->upload = new std::string();
+        response->upload->reserve(size_t(length));
+        response->upload_expected = length; response->rtc_offer = true;
+        return 0;
+      }
+      if (path == "/rtc/session") {
+        if (!response) return -1;
+        if (lws_hdr_total_length(wsi, WSI_TOKEN_DELETE_URI) <= 0) {
+          return errorResponse(wsi, response, HTTP_STATUS_METHOD_NOT_ALLOWED, "method_not_allowed");
+        }
+        if (!localRequest(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_FORBIDDEN, "forbidden");
+        if (!authenticated(s->config, wsi)) return errorResponse(wsi, response, HTTP_STATUS_UNAUTHORIZED, "unauthorized");
+        if (!s->rtc) return errorResponse(wsi, response, HTTP_STATUS_NOT_FOUND, "not_found");
+        s->rtc.reset();
+        return jsonResponse(wsi, response, HTTP_STATUS_OK, "{\"ended\":true}");
+      }
+#endif
       if (path == "/clipboard") {
         if (!response) return -1;
         const bool write = lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) > 0;
@@ -641,6 +693,9 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
     }
     case LWS_CALLBACK_HTTP_BODY_COMPLETION: {
       auto* response = static_cast<HttpResponse*>(user);
+#ifdef RELAY_RTC
+      if (response && response->upload && response->rtc_offer) return rtcOffer(wsi, response, s);
+#endif
       if (response && response->upload) return clipboardWrite(wsi, response, s);
       return response && response->input_expected ? inputResponse(wsi, response, s) : 0;
     }
@@ -726,6 +781,12 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         lws_callback_on_writable(stream->viewer);
       }
       if (s->control) lws_callback_on_writable(s->control);
+#ifdef RELAY_RTC
+      if (s->rtc) {
+        for (const auto& record : s->rtc->takeInput()) if (!s->holdsInput()) s->input->apply(inputEvent(record.data()));
+        if (s->rtc->closed()) s->rtc.reset();
+      }
+#endif
       for (const auto& reply : s->readyInputs()) {
         auto* response = reply->wsi ? static_cast<HttpResponse*>(lws_wsi_user(reply->wsi)) : nullptr;
         if (!response) continue;

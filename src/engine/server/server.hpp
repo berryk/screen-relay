@@ -7,6 +7,9 @@
 #include "core/input.hpp"
 #include "screenshot.hpp"
 #include "wire.hpp"
+#ifdef RELAY_RTC
+#include "rtc.hpp"
+#endif
 #include <libwebsockets.h>
 #include <array>
 #include <atomic>
@@ -30,6 +33,9 @@ struct HttpResponse {
   Socket socket;
   uint64_t upload_expected, grant_id;
   bool image_headers, clipboard, input_reply, input_headers, closing;
+#ifdef RELAY_RTC
+  bool rtc_offer;
+#endif
   unsigned reply_status, image_status;
   const char* image_type;
 };
@@ -98,6 +104,9 @@ struct Server {
   std::unique_ptr<InputController> input;
   uint32_t nextGeneration = 0;
   uint16_t width = 0, height = 0;
+#ifdef RELAY_RTC
+  std::shared_ptr<RtcSession> rtc;
+#endif
   explicit Server(Config settings);
   Stream* streamFor(lws* wsi);
   ConnectionPlan planConnection(Socket socket, bool grant);

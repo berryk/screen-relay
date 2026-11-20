@@ -35,6 +35,10 @@ CXXFLAGS ?= -O2
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wpedantic -pthread
 BACKEND_LIBS = $(foreach backend,$(BACKENDS),$(BACKEND_LIBS_$(backend)))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) $(BACKEND_LIBS) -pthread
+ifeq ($(RTC),1)
+CPPFLAGS += -DRELAY_RTC
+LDLIBS += -ldatachannel
+endif
 
 CORE_SRCS = $(wildcard src/engine/core/*.cpp)
 BACKEND_SRCS = $(foreach dir,$(BACKEND_DIRS),$(wildcard src/engine/backends/$(dir)/*.cpp src/engine/backends/$(dir)/*.mm))

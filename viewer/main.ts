@@ -1,5 +1,5 @@
 import {
-  CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
+  CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, encodeInputRecord, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
   type InputEvent, type Message,
 } from '../src/protocol/index.js';
 
@@ -8,6 +8,9 @@ const canvas = document.querySelector('#screen') as HTMLCanvasElement,
   ctx = canvas.getContext('2d')!,
   status = document.querySelector('#status')!;
 const cursor = document.querySelector('#cursor') as HTMLCanvasElement, cursorContext = cursor.getContext('2d')!;
+const rtc = new URLSearchParams(location.hash.slice(1)).get('transport') === 'rtc';
+const video = document.querySelector('#video') as HTMLVideoElement, surface: HTMLElement = rtc ? video : canvas;
+let pc: RTCPeerConnection | undefined, channel: RTCDataChannel | undefined, rtcSession: string | undefined;
 /** The credential the link carries: the session token, or a watch or control grant that only opens WebSockets. */
 type Access = 'owner' | 'watch' | 'control';
 let accessToken = '', access: Access = 'owner';
@@ -200,6 +203,11 @@ document.addEventListener('paste', (e) => {
 });
 
 function sendInput(event: InputEvent): boolean {
+  if (rtc) {
+    if (channel?.readyState !== 'open' || (viewOnly && event.type !== 'releaseAll')) return false;
+    channel.send(encodeInputRecord({ ...event, buttons, modifiers }) as Uint8Array<ArrayBuffer>);
+    return true;
+  }
   if (!ready || socket?.readyState !== WebSocket.OPEN || (viewOnly && event.type !== 'releaseAll')) return false;
   const input = encodeInput({ ...event, buttons, modifiers }, generation, 0);
   if (paste.state === 'idle') socket.send(input);
@@ -400,7 +408,95 @@ function present() {
   }
   if (drew || decoded.length) schedulePresent();
 }
+/** Fields `__relayRtcStats` copies from the inbound-rtp video report. */
+const RTC_STAT_FIELDS = ['framesDecoded', 'framesDropped', 'framesReceived', 'packetsLost', 'nackCount', 'pliCount', 'jitter', 'totalDecodeTime',
+  'frameWidth', 'frameHeight', 'framesPerSecond', 'jitterBufferDelay', 'jitterBufferEmittedCount'];
+/** DELETEs a WHEP session resource. */
+function deleteRtc(session: string) {
+  fetch(session, { method: 'DELETE', headers: accessToken ? { authorization: `Bearer ${accessToken}` } : {}, keepalive: true }).catch(() => {});
+}
+/** Closes the peer connection and ends its WHEP session. */
+function endRtc() {
+  pc?.close();
+  if (rtcSession) deleteRtc(rtcSession);
+  rtcSession = undefined;
+}
+/** Opens the opt-in WebRTC path: a non-trickle offer to POST /rtc, video into the video element, and input on the `input` data channel. */
+async function connectRtc() {
+  epoch++;
+  const current = epoch;
+  endRtc();
+  reset();
+  canvas.hidden = true;
+  video.hidden = false;
+  setStatus('Connecting… · WebRTC');
+  const peer = pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+  const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
+  if (codecs && transceiver.setCodecPreferences) {
+    const rank = (codec: RTCRtpCodec) => codec.mimeType.toLowerCase() !== 'video/h264' || !/packetization-mode=1/.test(codec.sdpFmtpLine ?? '') ? 2
+      : /profile-level-id=42e01f/i.test(codec.sdpFmtpLine ?? '') ? 0 : 1;
+    transceiver.setCodecPreferences([...codecs].sort((a, b) => rank(a) - rank(b)));
+  }
+  const receiver = transceiver.receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null; playoutDelayHint?: number };
+  if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
+  if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
+  channel = peer.createDataChannel('input', { ordered: true });
+  channel.binaryType = 'arraybuffer';
+  peer.ontrack = (e) => { if (current === epoch) video.srcObject = e.streams[0] ?? new MediaStream([e.track]); };
+  peer.onconnectionstatechange = () => {
+    if (current === epoch && ['failed', 'disconnected', 'closed'].includes(peer.connectionState)) setStatus(`WebRTC ${peer.connectionState}`);
+    if (current === epoch && peer.connectionState === 'failed') endRtc();
+  };
+  try {
+    await peer.setLocalDescription(await peer.createOffer());
+    await new Promise<void>((done) => {
+      if (peer.iceGatheringState === 'complete') return done();
+      setTimeout(done, 2000);
+      peer.addEventListener('icegatheringstatechange', () => { if (peer.iceGatheringState === 'complete') done(); });
+    });
+    const response = await fetch('/rtc', {
+      method: 'POST', cache: 'no-store', redirect: 'error', body: peer.localDescription!.sdp,
+      headers: { 'content-type': 'application/sdp', ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) },
+    });
+    if (!response.ok) throw new Error((await response.json().catch(() => null))?.error ?? `HTTP ${response.status}`);
+    const resource = response.headers.get('location'), session = resource ? new URL(resource, location.href).href : undefined;
+    if (current !== epoch) { if (session) deleteRtc(session); return; }
+    rtcSession = session;
+    await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+  } catch (error: any) {
+    if (current !== epoch) return;
+    setStatus(`WebRTC failed: ${error.message}`);
+    endRtc();
+  }
+}
+/** Returns the client rect of the video's displayed content inside its object-fit: contain letterbox, and the stream size. */
+function videoRect(): [{ left: number; top: number; width: number; height: number }, number, number] {
+  const box = video.getBoundingClientRect(), w = video.videoWidth, h = video.videoHeight;
+  const scale = w && h ? Math.min(box.width / w, box.height / h) : 0;
+  return [{ left: box.left + (box.width - w * scale) / 2, top: box.top + (box.height - h * scale) / 2, width: w * scale, height: h * scale }, w, h];
+}
+if (rtc) {
+  window.addEventListener('pagehide', endRtc);
+  video.addEventListener('playing', () => {
+    ready = true;
+    setStatus(`${viewOnly ? 'Live · view only' : 'Live · you have control'} · WebRTC`);
+  });
+  (window as any).__relayRtcStats = async () => {
+    const result: Record<string, unknown> = { connectionState: pc?.connectionState ?? 'new' };
+    const reports = await pc?.getStats();
+    reports?.forEach((report: any) => {
+      if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        for (const field of RTC_STAT_FIELDS) result[field] = report[field];
+        result.mimeType = reports.get(report.codecId)?.mimeType;
+      }
+      if (report.type === 'candidate-pair' && (report.selected || (report.nominated && report.state === 'succeeded'))) result.currentRoundTripTime = report.currentRoundTripTime;
+    });
+    return result;
+  };
+}
 function connect() {
+  if (rtc) { connectRtc(); return; }
   if (reconnectMode === 'grant-ended') return;
   reconnectMode = 'automatic';
   clearTimeout(retryTimer);
@@ -548,14 +644,14 @@ function connect() {
 function position(e: MouseEvent) {
   pointerPosition = { clientX: e.clientX, clientY: e.clientY, pointerType: (e as PointerEvent).pointerType };
   renderCursor();
-  const r = canvas.getBoundingClientRect();
+  const [r, w, h] = rtc ? videoRect() : [canvas.getBoundingClientRect(), canvas.width, canvas.height];
   if (r.width <= 0 || r.height <= 0) return;
-  const px = clamp(Math.floor((e.clientX - r.left) * canvas.width / r.width), 0, canvas.width - 1);
-  const py = clamp(Math.floor((e.clientY - r.top) * canvas.height / r.height), 0, canvas.height - 1);
-  x = px / (canvas.width - 1);
-  y = py / (canvas.height - 1);
+  const px = clamp(Math.floor((e.clientX - r.left) * w / r.width), 0, w - 1);
+  const py = clamp(Math.floor((e.clientY - r.top) * h / r.height), 0, h - 1);
+  x = px / (w - 1);
+  y = py / (h - 1);
 }
-canvas.addEventListener('keydown', (e) => {
+surface.addEventListener('keydown', (e) => {
   const code = mapKey(keys[e.code]);
   if (!code) return;
   if (paste.state !== 'idle' && e.code === 'KeyV') { e.preventDefault(); return; }
@@ -571,7 +667,7 @@ canvas.addEventListener('keydown', (e) => {
   held.add(code);
   if (code < 224) releaseLatched();
 });
-canvas.addEventListener('keyup', (e) => {
+surface.addEventListener('keyup', (e) => {
   const code = mapKey(keys[e.code]);
   if (!code) return;
   e.preventDefault();
@@ -580,40 +676,40 @@ canvas.addEventListener('keyup', (e) => {
   if (!held.delete(code)) return;
   if (!dropLatch(code)) releaseKey(code);
 });
-canvas.addEventListener('pointermove', (e) => {
+surface.addEventListener('pointermove', (e) => {
   position(e);
   sendInput({ type: 'pointerMove', x, y });
 });
-canvas.addEventListener('pointerleave', () => { pointerPosition = null; renderCursor(); });
+surface.addEventListener('pointerleave', () => { pointerPosition = null; renderCursor(); });
 new ResizeObserver(renderCursor).observe(canvas);
 window.addEventListener('scroll', renderCursor, { passive: true });
 const buttonMap: Record<number, 1 | 2 | 3> = { 0: 1, 1: 2, 2: 3 };
-canvas.addEventListener('pointerdown', (e) => {
+surface.addEventListener('pointerdown', (e) => {
   const button = buttonMap[e.button];
   if (!button) return;
   e.preventDefault();
-  canvas.focus();
+  surface.focus();
   position(e);
   buttons |= 1 << (button - 1);
-  canvas.setPointerCapture(e.pointerId);
+  surface.setPointerCapture(e.pointerId);
   sendInput({ type: 'buttonDown', button, x, y });
 });
-canvas.addEventListener('pointerup', (e) => {
+surface.addEventListener('pointerup', (e) => {
   const button = buttonMap[e.button];
   if (!button) return;
   e.preventDefault();
   position(e);
   buttons &= ~(1 << (button - 1));
   sendInput({ type: 'buttonUp', button, x, y });
-  if (!buttons && canvas.hasPointerCapture(e.pointerId)) {
-    canvas.releasePointerCapture(e.pointerId);
+  if (!buttons && surface.hasPointerCapture(e.pointerId)) {
+    surface.releasePointerCapture(e.pointerId);
   }
 });
-canvas.addEventListener('pointercancel', release);
-canvas.addEventListener('lostpointercapture', () => {
+surface.addEventListener('pointercancel', release);
+surface.addEventListener('lostpointercapture', () => {
   if (buttons) release();
 });
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+surface.addEventListener('contextmenu', (e) => e.preventDefault());
 const WHEEL_LINES_PER_NOTCH = 3;
 const WHEEL_PIXELS_PER_NOTCH = 100;
 const wheelRemainder = [0, 0];
@@ -626,7 +722,7 @@ function wheelNotches(e: WheelEvent, axis: 0 | 1): number {
   if (e.deltaMode === 2) return delta;
   return delta / WHEEL_PIXELS_PER_NOTCH;
 }
-canvas.addEventListener('wheel', (e) => {
+surface.addEventListener('wheel', (e) => {
   e.preventDefault();
   position(e);
   for (const axis of [0, 1] as const) {
@@ -640,7 +736,7 @@ canvas.addEventListener('wheel', (e) => {
     sendInput({ type: 'wheel', axis: axis ? 'horizontal' : 'vertical', delta: clamp(whole * 120, -1200, 1200), x, y });
   }
 }, { passive: false });
-canvas.addEventListener('blur', release);
+surface.addEventListener('blur', release);
 window.addEventListener('blur', () => { release(); pointerPosition = null; renderCursor(); });
 const METRICS_UNAVAILABLE = 'Cgroup CPU (one core): unavailable · Cgroup RAM: unavailable';
 let hudTimer: any, metricsRequest: AbortController | null, configuredFps = 0;
@@ -848,7 +944,7 @@ function syncStatus() {
 new MutationObserver(syncStatus).observe(status, { childList: true, characterData: true, subtree: true });
 syncStatus();
 toggle.addEventListener('click', () => setExpanded(actions.hidden));
-canvas.addEventListener('pointerdown', () => showPanel(null));
+surface.addEventListener('pointerdown', () => showPanel(null));
 const toolbarActions: Record<string, (button: Element) => void> = {
   fullscreen: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen())
     .catch(() => {}),
@@ -906,7 +1002,7 @@ panels.keys.addEventListener('mousedown', keepCanvasFocus);
 panels.keys.addEventListener('click', (e) => {
   if ((e.target as Element).closest('#meta-ctrl')) {
     toggleMeta();
-    canvas.focus();
+    surface.focus();
     return;
   }
   const hold = (e.target as Element).closest('[data-hold]');
@@ -916,7 +1012,7 @@ panels.keys.addEventListener('click', (e) => {
       latched.set(code, hold);
       hold.setAttribute('aria-pressed', 'true');
     }
-    canvas.focus();
+    surface.focus();
     return;
   }
   const button = (e.target as Element).closest('[data-keys]');
@@ -927,7 +1023,7 @@ panels.keys.addEventListener('click', (e) => {
   for (const code of pressed.reverse()) releaseKey(code);
   if (codes.some((code) => code < 224)) releaseLatched();
   showPanel(null);
-  canvas.focus();
+  surface.focus();
 });
 function replaceAccess(value: string, next: Access) {
   clipboardAvailable = false;
