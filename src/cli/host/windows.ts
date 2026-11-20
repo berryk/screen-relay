@@ -94,9 +94,9 @@ export function msys2Failure(found: Msys2Problem): Failure {
   return new Failure('missing_dependency', 'MSYS2 is not installed', 'Run screen-relay install to create and install MSYS2 with the access rules it checks.');
 }
 
-/** The fix for an MSYS2 tree that setup will not run: uninstall it so winget does not treat it as installed, delete what is left, and let setup install a fresh copy. */
+/** The fix for an MSYS2 tree that setup will not run: delete it without running anything from it, and let setup install a fresh copy. */
 export function msys2Fix(found: Extract<Msys2Installation, { state: 'untrusted' }>): string {
-  return `${found.reason} Back up any files you need. If MSYS2 is installed there, uninstall it with ${found.root}\\uninstall.exe or winget uninstall MSYS2.MSYS2. Then delete what is left of ${found.root} and run screen-relay install again.`;
+  return `${found.reason} Do not run any program from ${found.root}. Back up any files you need, delete ${found.root}, and run screen-relay install again. If winget then reports success without installing MSYS2, follow the manual steps in the Windows guide.`;
 }
 
 /** Whether the signed-in account, SYSTEM, Administrators, or TrustedInstaller owns every MSYS2 path that setup runs or loads, and no other account can write to it. */
