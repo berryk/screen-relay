@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -9,8 +10,16 @@
 
 namespace relay {
 
+struct DamageRect;
+
 /** Pixel or surface input format expected by a VideoEncoder implementation. */
 enum class EncoderInput : uint8_t { nv12, bgra, native_handle };
+
+enum class TransferTier : uint8_t { zero_copy, dirty_upload, full_upload, software };
+
+const char* transferTierName(TransferTier tier);
+
+bool hardwareEncoderCoolingDown(const std::string& key);
 
 /** Per-frame encode outcome distinguishing rate-control drops from fatal encoder errors. */
 enum class EncodeStatus : uint8_t { encoded, dropped, failed };
@@ -43,6 +52,7 @@ struct EncodeRequest {
   uint64_t bitrate_bps = 0;
   const uint8_t* mb_info = nullptr;
   void* native_handle = nullptr;
+  const std::vector<DamageRect>* damage = nullptr;
 };
 
 /** Completed output produced by a VideoEncoder for one submitted frame. */
@@ -76,6 +86,7 @@ class VideoEncoder {
   virtual ~VideoEncoder() = default;
   virtual const std::string& name() const = 0;
   virtual bool hardware() const = 0;
+  virtual TransferTier transferTier() const { return hardware() ? TransferTier::full_upload : TransferTier::software; }
   virtual EncoderInput inputFormat() const = 0;
   /** Maximum number of frames accepted before waiting for completed output. */
   virtual unsigned maxInflight() const { return 1; }
@@ -122,6 +133,9 @@ class EncoderController {
   static constexpr unsigned max_consecutive_drops = 15;
   static constexpr unsigned max_software_failures = 3;
   static constexpr std::chrono::seconds hardware_cooldown{30};
+  static constexpr unsigned budget_window_frames = 30;
+  static constexpr unsigned budget_miss_threshold = 24;
+  static constexpr unsigned recovery_healthy_streak = 120;
 
   explicit EncoderController(EncoderFactories factories = {});
 
@@ -145,6 +159,7 @@ class EncoderController {
   EncoderState state() const { return state_; }
   const std::string& name() const { return encoder_ ? encoder_->name() : empty_; }
   bool hardware() const { return encoder_ && encoder_->hardware(); }
+  TransferTier transferTier() const { return encoder_ ? encoder_->transferTier() : TransferTier::software; }
   EncoderInput inputFormat() const { return encoder_ ? encoder_->inputFormat() : EncoderInput::nv12; }
   const std::string& profileLevelId() const { return profile_level_id_; }
   uint64_t droppedFrames() const { return dropped_frames_; }
@@ -153,7 +168,9 @@ class EncoderController {
  private:
   bool probeEncoder(VideoEncoder& encoder, std::string& reason);
   bool switchToSoftware(std::string& error);
+  EncoderDecision fallBackFromHardware(const std::string& reason, EncoderAction on_success);
   EncoderDecision handleHardwareFailure(const std::string& reason);
+  EncoderDecision publishHardwareFrame(uint64_t encode_ns);
 
   EncoderFactories factories_;
   EncoderConfig config_{};
@@ -165,6 +182,11 @@ class EncoderController {
   unsigned consecutive_drops_ = 0;
   unsigned consecutive_sw_failures_ = 0;
   bool hw_recovered_once_ = false;
+  unsigned healthy_hw_frames_ = 0;
+  std::array<bool, budget_window_frames> budget_misses_{};
+  unsigned budget_count_ = 0;
+  unsigned budget_index_ = 0;
+  unsigned budget_miss_total_ = 0;
   uint64_t dropped_frames_ = 0;
   uint64_t fallback_count_ = 0;
 };
@@ -182,7 +204,7 @@ std::unique_ptr<VideoEncoder> createVideoToolboxEncoder(const EncoderConfig& con
 
 #ifdef RELAY_HWENC
 /** Portable libavcodec hardware H.264 encoder factory for NVENC, VAAPI, QSV, AMF, or an explicit codec name. */
-std::unique_ptr<VideoEncoder> createLibavEncoder(const EncoderConfig& config, std::string& error);
+std::unique_ptr<VideoEncoder> createLibavEncoder(const EncoderConfig& config, EncoderReadyCallback on_ready, std::string& error);
 #endif
 
 }  // namespace relay

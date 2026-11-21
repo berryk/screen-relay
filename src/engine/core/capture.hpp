@@ -25,6 +25,7 @@ struct EncodedFrame {
 struct CaptureStats {
   bool cursor_supported = false;
   bool hardware_encoder = false;
+  TransferTier transfer_tier = TransferTier::software;
   std::string encoder;
   std::string encoder_state;
   std::string profile_level_id;

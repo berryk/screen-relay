@@ -103,6 +103,20 @@ class ScriptedEncoder final : public relay::VideoEncoder {
 relay::EncoderConfig baseConfig(const std::string& pref = "auto") {
   return {pref, 640, 360, 60, 8000000, true};
 }
+
+relay::EncoderFactories fakeHardware() {
+  return {[](const relay::EncoderConfig&, relay::EncoderReadyCallback, std::string&) {
+    return std::make_unique<ScriptedEncoder>("fake_hw", true, std::deque<ScriptedEncoder::Step>{});
+  }, {}};
+}
+
+relay::EncodeResult encodedFrame(uint64_t encode_ns) {
+  relay::EncodeResult result;
+  result.status = relay::EncodeStatus::encoded;
+  result.annex_b = validDelta();
+  result.encode_ns = encode_ns;
+  return result;
+}
 }  // namespace
 
 int main() {
@@ -129,6 +143,7 @@ int main() {
     ctrl.open(baseConfig("auto"), {});
     assert(ctrl.state() == EncoderState::hardware_active);
     assert(ctrl.hardware() && ctrl.name() == "fake_hw");
+    assert(std::strcmp(transferTierName(ctrl.transferTier()), "full_upload") == 0);
     assert(ctrl.profileLevelId() == "42c020");
     assert(sw_opens == 0);
 
@@ -161,6 +176,7 @@ int main() {
     assert(d2.action == EncoderAction::recover_idr && d2.switched_to_software);
     assert(ctrl.state() == EncoderState::software_active);
     assert(!ctrl.hardware() && ctrl.name() == "fake_sw");
+    assert(ctrl.transferTier() == TransferTier::software);
     assert(ctrl.fallbackCount() == 1);
     assert(sw_opens == 1);
   }
@@ -219,6 +235,60 @@ int main() {
     const auto decision = ctrl.evaluate(err, false);
     assert(decision.action == EncoderAction::fatal);
     assert(ctrl.state() == EncoderState::failed);
+  }
+
+  {
+    EncoderController ctrl(fakeHardware());
+    EncoderController::clearCooldowns();
+    auto config = baseConfig();
+    config.fps = 240;
+    ctrl.open(config, {});
+    const auto on_budget = encodedFrame(3'750'000);
+    const auto slow = encodedFrame(3'750'001);
+    const auto publish_on_hardware = [&](const EncodeResult& result) {
+      const auto decision = ctrl.evaluate(result, false);
+      assert(decision.action == EncoderAction::publish && !decision.switched_to_software);
+      assert(ctrl.state() == EncoderState::hardware_active);
+    };
+
+    const unsigned misses_below_threshold = EncoderController::budget_miss_threshold - 1;
+    const unsigned on_budget_count = EncoderController::budget_window_frames - misses_below_threshold;
+    publish_on_hardware(slow);
+    for (unsigned i = 0; i < on_budget_count; ++i) publish_on_hardware(on_budget);
+    for (unsigned i = 1; i < misses_below_threshold; ++i) publish_on_hardware(slow);
+    publish_on_hardware(slow);
+    const auto decision = ctrl.evaluate(slow, false);
+    assert(decision.action == EncoderAction::publish && decision.switched_to_software);
+    assert(ctrl.state() == EncoderState::software_active && ctrl.name() == "x264");
+    assert(ctrl.fallbackCount() == 1 && hardwareEncoderCoolingDown("fake_hw"));
+    assert(std::strcmp(transferTierName(ctrl.transferTier()), "software") == 0);
+  }
+
+  {
+    EncoderController ctrl(fakeHardware());
+    ctrl.open(baseConfig("fake_hw"), {});
+    const auto slow = encodedFrame(16'000'000);
+    for (unsigned i = 0; i < 2 * EncoderController::budget_window_frames; ++i) {
+      const auto decision = ctrl.evaluate(slow, false);
+      assert(decision.action == EncoderAction::publish && !decision.switched_to_software);
+      assert(ctrl.state() == EncoderState::hardware_active);
+    }
+    assert(ctrl.fallbackCount() == 0);
+  }
+
+  {
+    EncoderController ctrl(fakeHardware());
+    ctrl.open(baseConfig(), {});
+    const auto first = ctrl.onSubmitFailure("first transient failure", false);
+    assert(first.action == EncoderAction::recover_idr && !first.switched_to_software);
+    const auto healthy = encodedFrame(1'000'000);
+    for (unsigned i = 0; i < EncoderController::recovery_healthy_streak; ++i) {
+      const auto decision = ctrl.evaluate(healthy, false);
+      assert(decision.action == EncoderAction::publish && !decision.switched_to_software);
+    }
+    const auto second = ctrl.onSubmitFailure("second transient failure", false);
+    assert(second.action == EncoderAction::recover_idr && !second.switched_to_software);
+    assert(ctrl.state() == EncoderState::hardware_active && ctrl.fallbackCount() == 0);
   }
 
   {

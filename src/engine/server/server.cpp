@@ -595,6 +595,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
             ",\"encoder\":" + jsonString(stats.encoder) +
             ",\"hardware_encoder\":" + (stats.hardware_encoder ? "true" : "false") +
             ",\"encoder_state\":" + jsonString(stats.encoder_state) +
+            ",\"transfer_tier\":" + jsonString(transferTierName(stats.transfer_tier)) +
             ",\"input_endpoint\":\"/input\",\"max_input_batch\":" + std::to_string(max_input_batch) +
             ",\"audio\":false,\"clipboard\":" + (s->clipboard.available() ? "true" : "false") +
             ",\"clipboard_endpoint\":\"/clipboard\",\"max_clipboard_bytes\":" + std::to_string(max_clipboard_bytes) +

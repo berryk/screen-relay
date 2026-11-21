@@ -300,7 +300,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
                    "    [--allow-origin ORIGIN[,...]]]\n"
                    "  [--tls-cert FILE --tls-key FILE | --behind-tls-proxy]\n"
                    "  [--insecure-local: unauthenticated, isolated development network only]\n"
-                   "FPS is 10 to 120; bitrates are 250000 to 100000000 bits per second with\n"
+                   "FPS is 10 to 240; bitrates are 250000 to 100000000 bits per second with\n"
                    "min <= start <= max. Non-loopback --bind needs --token-file;\n"
                    "--public-origin also needs TLS or --behind-tls-proxy.\n"
                    "A browser request must come from the public origin, or from a loopback origin\n"
@@ -331,8 +331,8 @@ bool parseConfig(int argc, char** argv, Config& config) {
       config.port = unsigned(port);
     } else if (option == "--fps") {
       uint64_t fps;
-      if (!unsignedNumber(value, fps) || fps < 10 || fps > 120)
-        throw std::runtime_error("FPS must be an integer from 10 to 120");
+      if (!unsignedNumber(value, fps) || fps < 10 || fps > 240)
+        throw std::runtime_error("FPS must be an integer from 10 to 240");
       config.fps = unsigned(fps);
     } else if (option == "--bitrate-min") config.bitrate_min = bitrate(value);
     else if (option == "--bitrate-start") config.bitrate_start = bitrate(value);

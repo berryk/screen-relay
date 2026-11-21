@@ -10,14 +10,19 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace relay {
@@ -86,12 +91,15 @@ bool codecSupportsPixelFormat(const AVCodec* codec, AVPixelFormat target) {
 /** Portable libavcodec H.264 encoder for NVENC, VAAPI, QSV, AMF, or an explicit codec name. */
 class LibavEncoder final : public VideoEncoder {
  public:
-  LibavEncoder(const Candidate* candidate, std::string codec_name, const EncoderConfig& config)
-      : candidate_(candidate), name_(std::move(codec_name)), config_(config), bitrate_(config.bitrate_bps) {}
+  LibavEncoder(const Candidate* candidate, std::string codec_name, const EncoderConfig& config,
+               EncoderReadyCallback on_ready)
+      : candidate_(candidate), name_(std::move(codec_name)), config_(config), on_ready_(std::move(on_ready)),
+        bitrate_(config.bitrate_bps) {}
 
   ~LibavEncoder() override {
+    stopWorker();
     closeCodec();
-    av_frame_free(&frame_);
+    for (AVFrame*& slot : slots_) av_frame_free(&slot);
     av_frame_free(&upload_);
     av_packet_free(&packet_);
     av_buffer_unref(&device_);
@@ -104,17 +112,11 @@ class LibavEncoder final : public VideoEncoder {
       return false;
     }
     format_ = AV_PIX_FMT_NV12;
-    if (allocate() && openWithFallback(error)) {
-      changed_ = std::chrono::steady_clock::now();
-      return true;
-    }
+    if (allocate() && openWithFallback(error)) return startCodec();
     closeCodec();
     if (config_.source_bgra && codecSupportsPixelFormat(codec, AV_PIX_FMT_BGR0)) {
       format_ = AV_PIX_FMT_BGR0;
-      if (allocate() && openWithFallback(error)) {
-        changed_ = std::chrono::steady_clock::now();
-        return true;
-      }
+      if (allocate() && openWithFallback(error)) return startCodec();
       closeCodec();
     }
     return false;
@@ -122,26 +124,184 @@ class LibavEncoder final : public VideoEncoder {
 
   const std::string& name() const override { return name_; }
   bool hardware() const override { return true; }
+  TransferTier transferTier() const override { return TransferTier::full_upload; }
   EncoderInput inputFormat() const override { return format_ == AV_PIX_FMT_NV12 ? EncoderInput::nv12 : EncoderInput::bgra; }
-  unsigned maxInflight() const override { return 1; }
-  unsigned inflight() const override { return unsigned(ready_.size()); }
+  unsigned maxInflight() const override { return slot_count; }
+
+  unsigned inflight() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inflight_;
+  }
 
   EncoderPlanes planes() override {
-    if (frame_) av_frame_make_writable(frame_);
-    if (!frame_) return {};
-    if (format_ != AV_PIX_FMT_NV12) return {{frame_->data[0], nullptr}, {frame_->linesize[0], 0}};
-    return {{frame_->data[0], frame_->data[1]}, {frame_->linesize[0], frame_->linesize[1]}};
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (pending_slot_ < 0) {
+      cv_.wait(lock, [this] { return stopping_ || !open_ || freeSlot() >= 0; });
+      if (stopping_ || !open_) return {};
+      pending_slot_ = chooseSlot();
+    }
+    return pending_slot_ >= 0 ? slotPlanes(pending_slot_) : EncoderPlanes{};
   }
 
   bool submit(const EncodeRequest& req, std::string& error) override {
-    if (!context_ || !frame_) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!open_ || stopping_) {
       error = "libav encoder is not open";
       return false;
     }
+    int slot = pending_slot_;
+    if (slot >= 0) {
+      pending_slot_ = -1;
+    } else {
+      if (req.refinement) {
+        cv_.wait(lock, [this] { return stopping_ || !open_ || freeSlot() >= 0; });
+        if (stopping_ || !open_) {
+          error = "libav encoder is not open";
+          return false;
+        }
+        slot = chooseSlot();
+      } else {
+        slot = freeSlot();
+      }
+    }
+    if (slot < 0) {
+      error = "libav encoder has no free input slot";
+      return false;
+    }
+
+    Job job;
+    job.pts_us = req.pts_us;
+    job.tag = req.tag;
+    job.force_idr = req.force_idr;
+    job.refinement = req.refinement;
+    job.bitrate_bps = req.bitrate_bps;
+    job.slot = slot;
+    job.frame = slots_[slot];
+    slot_busy_[slot] = true;
+    latest_ = slot;
+    ++inflight_;
+    jobs_.push_back(job);
+    cv_.notify_all();
+    return true;
+  }
+
+  bool poll(std::vector<EncodeResult>& out, bool wait) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (wait && ready_.empty() && inflight_ > 0) {
+      cv_.wait(lock, [this] { return !ready_.empty() || inflight_ == 0; });
+    }
+    if (ready_.empty()) return false;
+    while (!ready_.empty()) {
+      out.push_back(std::move(ready_.front()));
+      ready_.pop_front();
+    }
+    return true;
+  }
+
+  void flush(std::vector<EncodeResult>& out) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return inflight_ == 0 || stopping_ || !open_; });
+    while (!ready_.empty()) {
+      out.push_back(std::move(ready_.front()));
+      ready_.pop_front();
+    }
+  }
+
+  bool reset(std::string& error) override {
+    stopWorker();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      open_ = false;
+      ready_.clear();
+      pending_slot_ = -1;
+      latest_ = -1;
+      slot_busy_.fill(false);
+      inflight_ = 0;
+    }
+    closeCodec();
+    if (!openWithFallback(error)) return false;
+    return startCodec();
+  }
+
+ private:
+  static constexpr int slot_count = 2;
+
+  struct Job {
+    int64_t pts_us = 0;
+    uint64_t tag = 0;
+    bool force_idr = false;
+    bool refinement = false;
+    uint64_t bitrate_bps = 0;
+    int slot = 0;
+    AVFrame* frame = nullptr;
+  };
+
+  bool startCodec() {
+    changed_ = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_ = true;
+    return startWorker();
+  }
+
+  bool startWorker() {
+    if (worker_.joinable()) return true;
+    stopping_ = false;
+    worker_ = std::thread([this] { workerLoop(); });
+    return worker_.joinable();
+  }
+
+  /** Stops the encode worker and drops any queued jobs; callers must not hold mutex_ or use the codec afterwards. */
+  void stopWorker() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+      jobs_.clear();
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (inflight_ > 0) inflight_ = 0;
+  }
+
+  void workerLoop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+      cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
+      if (stopping_) return;
+      const Job job = jobs_.front();
+      jobs_.pop_front();
+      lock.unlock();
+
+      const auto started = std::chrono::steady_clock::now();
+      EncodeResult res = encodeJob(job, started);
+
+      lock.lock();
+      slot_busy_[job.slot] = false;
+      ready_.push_back(std::move(res));
+      if (inflight_ > 0) --inflight_;
+      cv_.notify_all();
+      lock.unlock();
+      if (on_ready_) on_ready_();
+      lock.lock();
+    }
+  }
+
+  /** Encodes one queued frame on the worker thread and returns its completed result. */
+  EncodeResult encodeJob(const Job& job, std::chrono::steady_clock::time_point started) {
     using Clock = std::chrono::steady_clock;
-    const auto start = Clock::now();
-    bool idr = req.force_idr;
-    const uint64_t rate = req.bitrate_bps ? req.bitrate_bps : bitrate_;
+    EncodeResult res;
+    res.pts_us = job.pts_us;
+    res.tag = job.tag;
+    const auto finish = [&](EncodeStatus status, std::string message) {
+      res.status = status;
+      res.error = std::move(message);
+      res.encode_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count());
+      return std::move(res);
+    };
+    if (!context_ || !job.frame) return finish(EncodeStatus::failed, "libav encoder is not open");
+
+    bool idr = job.force_idr;
+    const uint64_t rate = job.bitrate_bps ? job.bitrate_bps : bitrate_;
     const auto now = Clock::now();
     const bool large_change = rate * 4 > bitrate_ * 5 || rate * 5 < bitrate_ * 4;
     if (large_change && now - changed_ >= std::chrono::seconds(1)) {
@@ -153,32 +313,30 @@ class LibavEncoder final : public VideoEncoder {
       } else {
         std::string reopen_error;
         if (!openWithFallback(reopen_error)) {
-          error = "reopen: " + reopen_error;
-          return false;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            open_ = false;
+          }
+          return finish(EncodeStatus::failed, "reopen: " + reopen_error);
         }
         idr = true;
       }
     }
 
-    AVFrame* input = frame_;
+    AVFrame* input = job.frame;
     if (context_->hw_frames_ctx) {
-      if (!upload_ && !(upload_ = av_frame_alloc())) {
-        error = "out of memory";
-        return false;
-      }
+      if (!upload_ && !(upload_ = av_frame_alloc())) return finish(EncodeStatus::failed, "out of memory");
       av_frame_unref(upload_);
       if (const int code = av_hwframe_get_buffer(context_->hw_frames_ctx, upload_, 0)) {
-        error = "hardware frame: " + avError(code);
-        return false;
+        return finish(EncodeStatus::failed, "hardware frame: " + avError(code));
       }
-      if (const int code = av_hwframe_transfer_data(upload_, frame_, 0)) {
-        error = "upload: " + avError(code);
-        return false;
+      if (const int code = av_hwframe_transfer_data(upload_, job.frame, 0)) {
+        return finish(EncodeStatus::failed, "upload: " + avError(code));
       }
       input = upload_;
     }
 
-    input->pts = req.pts_us;
+    input->pts = job.pts_us;
     input->pict_type = idr ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 #ifdef AV_FRAME_FLAG_KEY
     if (idr) input->flags |= AV_FRAME_FLAG_KEY;
@@ -188,67 +346,73 @@ class LibavEncoder final : public VideoEncoder {
 #endif
 
     if (const int code = avcodec_send_frame(context_, input)) {
-      error = "send: " + avError(code);
-      return false;
+      return finish(EncodeStatus::failed, "send: " + avError(code));
     }
 
-    EncodeResult res;
-    res.pts_us = req.pts_us;
-    res.tag = req.tag;
     bool keyframe = false;
     while (true) {
       const int code = avcodec_receive_packet(context_, packet_);
       if (code == AVERROR(EAGAIN)) break;
       if (code < 0) {
-        res.status = EncodeStatus::failed;
-        res.error = "receive: " + avError(code);
-        res.encode_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
-        ready_.push_back(std::move(res));
-        return true;
+        av_packet_unref(packet_);
+        return finish(EncodeStatus::failed, "receive: " + avError(code));
       }
       res.annex_b.insert(res.annex_b.end(), packet_->data, packet_->data + packet_->size);
       keyframe |= (packet_->flags & AV_PKT_FLAG_KEY) != 0;
       av_packet_unref(packet_);
     }
 
-    res.encode_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
-    if (res.annex_b.empty()) {
-      res.status = EncodeStatus::dropped;
-      res.error = "encoder dropped frame";
-      ready_.push_back(std::move(res));
-      return true;
-    }
+    const uint64_t encode_ns =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count());
+    if (res.annex_b.empty()) return finish(EncodeStatus::dropped, "encoder dropped frame");
     if (res.annex_b.size() > FlowControl::max_bytes) {
-      res.status = EncodeStatus::failed;
-      res.error = "encoded access unit too large";
       res.annex_b.clear();
-      ready_.push_back(std::move(res));
-      return true;
+      return finish(EncodeStatus::failed, "encoded access unit too large");
     }
     res.status = EncodeStatus::encoded;
     res.keyframe = keyframe;
-    res.converged = req.refinement && res.annex_b.size() <= rate / (4ull * std::max(1u, config_.fps));
-    ready_.push_back(std::move(res));
-    return true;
+    res.converged = job.refinement && res.annex_b.size() <= rate / (4ull * std::max(1u, config_.fps));
+    res.encode_ns = encode_ns;
+    return res;
   }
 
-  bool poll(std::vector<EncodeResult>& out, bool) override {
-    if (ready_.empty()) return false;
-    while (!ready_.empty()) {
-      out.push_back(std::move(ready_.front()));
-      ready_.pop_front();
+  int freeSlot() const {
+    for (int i = 0; i < slot_count; ++i) {
+      if (!slot_busy_[i]) return i;
     }
-    return true;
+    return -1;
   }
 
-  void flush(std::vector<EncodeResult>& out) override { poll(out, false); }
-
-  bool reset(std::string& error) override {
-    ready_.clear();
-    return openWithFallback(error);
+  /** Picks the slot the caller writes next, copying the newest frame when the ring rotates. */
+  int chooseSlot() {
+    if (latest_ >= 0 && !slot_busy_[latest_]) return latest_;
+    const int target = freeSlot();
+    if (target < 0) return -1;
+    if (latest_ >= 0) copyFrame(slots_[target], slots_[latest_]);
+    return target;
   }
 
- private:
+  EncoderPlanes slotPlanes(int slot) const {
+    AVFrame* frame = slots_[slot];
+    if (!frame) return {};
+    if (format_ != AV_PIX_FMT_NV12) return {{frame->data[0], nullptr}, {frame->linesize[0], 0}};
+    return {{frame->data[0], frame->data[1]}, {frame->linesize[0], frame->linesize[1]}};
+  }
+
+  /** Copies one ring frame over another so callers only have to rewrite damaged regions. */
+  void copyFrame(AVFrame* target, const AVFrame* source) const {
+    if (!target || !source || target->format != source->format) return;
+    const int planes = format_ == AV_PIX_FMT_NV12 ? 2 : 1;
+    for (int plane = 0; plane < planes; ++plane) {
+      const int rows = plane ? config_.height / 2 : config_.height;
+      const int bytes = std::min(target->linesize[plane], source->linesize[plane]);
+      for (int y = 0; y < rows; ++y) {
+        std::memcpy(target->data[plane] + size_t(y) * size_t(target->linesize[plane]),
+                    source->data[plane] + size_t(y) * size_t(source->linesize[plane]), size_t(bytes));
+      }
+    }
+  }
+
   void closeCodec() { avcodec_free_context(&context_); }
 
   bool openCodec(const char* options, std::string& error) {
@@ -331,52 +495,72 @@ class LibavEncoder final : public VideoEncoder {
   }
 
   bool allocate() {
-    av_frame_free(&frame_);
+    for (AVFrame*& slot : slots_) av_frame_free(&slot);
     if (!packet_) packet_ = av_packet_alloc();
-    frame_ = av_frame_alloc();
-    if (!frame_ || !packet_) return false;
-    frame_->format = format_;
-    frame_->width = config_.width;
-    frame_->height = config_.height;
-    if (av_frame_get_buffer(frame_, 0) < 0) return false;
-    if (format_ != AV_PIX_FMT_NV12) {
-      std::memset(frame_->data[0], 0, size_t(frame_->linesize[0]) * size_t(config_.height));
-      return true;
+    if (!packet_) return false;
+    for (AVFrame*& slot : slots_) {
+      slot = av_frame_alloc();
+      if (!slot) return false;
+      slot->format = format_;
+      slot->width = config_.width;
+      slot->height = config_.height;
+      if (av_frame_get_buffer(slot, 0) < 0) return false;
+      blankFrame(slot);
     }
-    std::memset(frame_->data[0], 16, size_t(frame_->linesize[0]) * size_t(config_.height));
-    std::memset(frame_->data[1], 128, size_t(frame_->linesize[1]) * size_t(config_.height / 2));
     return true;
+  }
+
+  /** Fills a freshly allocated ring frame with neutral luma and chroma. */
+  void blankFrame(AVFrame* frame) const {
+    if (format_ != AV_PIX_FMT_NV12) {
+      std::memset(frame->data[0], 0, size_t(frame->linesize[0]) * size_t(config_.height));
+      return;
+    }
+    std::memset(frame->data[0], 16, size_t(frame->linesize[0]) * size_t(config_.height));
+    std::memset(frame->data[1], 128, size_t(frame->linesize[1]) * size_t(config_.height / 2));
   }
 
   const Candidate* candidate_ = nullptr;
   std::string name_;
   EncoderConfig config_;
+  EncoderReadyCallback on_ready_;
   uint64_t bitrate_ = 0;
   AVPixelFormat format_ = AV_PIX_FMT_NV12;
   std::chrono::steady_clock::time_point changed_{};
   AVBufferRef* device_ = nullptr;
   AVCodecContext* context_ = nullptr;
-  AVFrame* frame_ = nullptr;
+  std::array<AVFrame*, slot_count> slots_{};
   AVFrame* upload_ = nullptr;
   AVPacket* packet_ = nullptr;
+  bool open_ = false;
+  int pending_slot_ = -1;
+  int latest_ = -1;
+  std::array<bool, slot_count> slot_busy_{};
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::thread worker_;
+  std::deque<Job> jobs_;
   std::deque<EncodeResult> ready_;
+  unsigned inflight_ = 0;
+  bool stopping_ = false;
 };
 }  // namespace
 
-std::unique_ptr<VideoEncoder> createLibavEncoder(const EncoderConfig& config, std::string& error) {
+std::unique_ptr<VideoEncoder> createLibavEncoder(const EncoderConfig& config, EncoderReadyCallback on_ready, std::string& error) {
   av_log_set_level(AV_LOG_FATAL);
   if (config.preference != "auto") {
     const Candidate* known = nullptr;
     for (const auto& candidate : candidates) {
       if (config.preference == candidate.name) known = &candidate;
     }
-    auto enc = std::make_unique<LibavEncoder>(known, config.preference, config);
+    auto enc = std::make_unique<LibavEncoder>(known, config.preference, config, std::move(on_ready));
     if (enc->init(error)) return enc;
     return nullptr;
   }
   for (const auto& candidate : candidates) {
+    if (hardwareEncoderCoolingDown(candidate.name)) continue;
     std::string reason;
-    auto enc = std::make_unique<LibavEncoder>(&candidate, candidate.name, config);
+    auto enc = std::make_unique<LibavEncoder>(&candidate, candidate.name, config, on_ready);
     if (enc->init(reason)) return enc;
     error = std::string(candidate.name) + ": " + reason;
   }

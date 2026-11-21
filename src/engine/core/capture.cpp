@@ -273,6 +273,7 @@ struct CaptureEncoder::Impl {
     std::lock_guard<std::mutex> lock(mutex);
     counters.encoder = controller.name();
     counters.hardware_encoder = controller.hardware();
+    counters.transfer_tier = controller.transferTier();
     counters.encoder_state = encoderStateName(controller.state());
     counters.profile_level_id = controller.profileLevelId();
     counters.dropped_frames = controller.droppedFrames();
@@ -300,6 +301,7 @@ struct CaptureEncoder::Impl {
         counters.cursor_supported = source->cursorSupported();
         counters.encoder = p.controller.name();
         counters.hardware_encoder = p.controller.hardware();
+        counters.transfer_tier = p.controller.transferTier();
         counters.encoder_state = encoderStateName(p.controller.state());
         counters.profile_level_id = p.controller.profileLevelId();
         initialized = true;
@@ -427,6 +429,16 @@ struct CaptureEncoder::Impl {
           } else if (res.converged || ++refinements >= max_refinements) {
             refining = false;
           }
+
+          if (decision.switched_to_software) {
+            std::vector<EncodeResult> discarded;
+            p.controller.active().flush(discarded);
+            pending_jobs.clear();
+            dirty = true;
+            force_idr = true;
+            reset_refinement();
+            return;
+          }
         }
       };
 
@@ -531,6 +543,7 @@ struct CaptureEncoder::Impl {
                 require(view.width == width && view.height == height && view.format == p.format,
                         "invalid native capture frame");
                 native_handle = view.native_handle;
+                rects = {{view.x, view.y, view.width, view.height}};
               } else {
                 require(view.data && view.width > 0 && view.height > 0 &&
                         view.x >= 0 && view.x <= width && view.y >= 0 && view.y <= height &&
@@ -544,6 +557,7 @@ struct CaptureEncoder::Impl {
                 require(planes.data[0] != nullptr, "encoder planes unavailable");
                 bool changed = true;
                 if (submit_idr) {
+                  rects = {{view.x, view.y, view.width, view.height}};
                   require(p.convertFull(view, planes, rgb_planes), "RGB conversion failed");
                 } else {
                   if (!source->changedRects(rects)) rects = {{view.x, view.y, view.width, view.height}};
@@ -581,6 +595,7 @@ struct CaptureEncoder::Impl {
             req.bitrate_bps = rate;
             req.mb_info = (!refinement && !submit_idr) ? p.mb_info.data() : nullptr;
             req.native_handle = native_handle;
+            req.damage = refinement ? nullptr : &rects;
 
             std::string submit_error;
             if (!p.controller.active().submit(req, submit_error)) {

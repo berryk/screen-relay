@@ -310,6 +310,7 @@ class VideoToolboxEncoder final : public VideoEncoder {
 
   const std::string& name() const override { return name_; }
   bool hardware() const override { return true; }
+  TransferTier transferTier() const override { return TransferTier::zero_copy; }
   EncoderInput inputFormat() const override { return EncoderInput::native_handle; }
   unsigned maxInflight() const override { return vt_max_inflight; }
 
@@ -428,6 +429,7 @@ class VideoToolboxEncoder final : public VideoEncoder {
       std::lock_guard<std::mutex> lock(mutex_);
       ready_.clear();
       inflight_ = 0;
+      has_last_complete_ = false;
     }
     return createSession(error);
   }
@@ -440,12 +442,10 @@ class VideoToolboxEncoder final : public VideoEncoder {
   }
 
   void handleOutput(std::unique_ptr<VtFrameContext> ctx, OSStatus status, VTEncodeInfoFlags flags, CMSampleBufferRef sample) {
+    const auto now = std::chrono::steady_clock::now();
     EncodeResult res;
     res.tag = ctx ? ctx->tag : 0;
     res.pts_us = ctx ? ctx->pts_us : 0;
-    res.encode_ns = ctx
-        ? uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ctx->submitted).count())
-        : 0;
 
     if (status != noErr) {
       res.status = EncodeStatus::failed;
@@ -468,6 +468,14 @@ class VideoToolboxEncoder final : public VideoEncoder {
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (ctx) {
+        const auto start = (has_last_complete_ && last_complete_ > ctx->submitted) ? last_complete_ : ctx->submitted;
+        res.encode_ns = now > start
+            ? uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count())
+            : 0;
+      }
+      last_complete_ = now;
+      has_last_complete_ = true;
       ready_.push_back(std::move(res));
       if (inflight_ > 0) --inflight_;
     }
@@ -475,6 +483,7 @@ class VideoToolboxEncoder final : public VideoEncoder {
     if (on_ready_) on_ready_();
   }
 
+  /** Updates the average bitrate and the one-second data rate cap VideoToolbox enforces between keyframes. */
   void updateBitrate(uint64_t rate) {
     bitrate_.store(rate, std::memory_order_relaxed);
     if (!session_) return;
@@ -485,36 +494,32 @@ class VideoToolboxEncoder final : public VideoEncoder {
       VTSessionSetProperty(session_, kVTCompressionPropertyKey_AverageBitRate, cf_br);
       CFRelease(cf_br);
     }
+    int64_t bytes_per_second = std::max<int64_t>(int64_t(rate * 3 / 16), 16384);
+    double seconds = 1.0;
+    CFNumberRef cf_bytes = CFNumberCreate(nullptr, kCFNumberSInt64Type, &bytes_per_second);
+    CFNumberRef cf_seconds = CFNumberCreate(nullptr, kCFNumberDoubleType, &seconds);
+    if (cf_bytes && cf_seconds) {
+      const void* values[] = {cf_bytes, cf_seconds};
+      CFArrayRef limits = CFArrayCreate(nullptr, values, 2, &kCFTypeArrayCallBacks);
+      if (limits) {
+        VTSessionSetProperty(session_, kVTCompressionPropertyKey_DataRateLimits, limits);
+        CFRelease(limits);
+      }
+    }
+    if (cf_bytes) CFRelease(cf_bytes);
+    if (cf_seconds) CFRelease(cf_seconds);
   }
 
+  /** Creates the compression session, retrying without low-latency rate control when this Mac rejects it. */
   bool createSession(std::string& error) {
     destroySession();
-    CFMutableDictionaryRef enc_spec = CFDictionaryCreateMutable(nullptr, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
-    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
-
-    CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(nullptr, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int32_t pix_fmt = kCVPixelFormatType_32BGRA;
-    CFNumberRef cf_pix = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pix_fmt);
-    CFDictionaryRef io_props = CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(src_attrs, kCVPixelBufferPixelFormatTypeKey, cf_pix);
-    CFDictionarySetValue(src_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
-    CFRelease(io_props);
-    CFRelease(cf_pix);
-
-    const OSStatus created = VTCompressionSessionCreate(nullptr, config_.width, config_.height, kCMVideoCodecType_H264,
-                                                        enc_spec, src_attrs, nullptr, outputCallback, this, &session_);
-    CFRelease(src_attrs);
-    CFRelease(enc_spec);
-    if (created != noErr || !session_) {
-      session_ = nullptr;
-      error = "VTCompressionSessionCreate failed (" + std::to_string(int(created)) + ")";
-      return false;
-    }
+    bool low_latency = openSession(true, error);
+    if (!low_latency && !openSession(false, error)) return false;
 
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_AllowTemporalCompression, kCFBooleanTrue);
+    VTSessionSetProperty(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
@@ -544,6 +549,36 @@ class VideoToolboxEncoder final : public VideoEncoder {
     return true;
   }
 
+  /** Creates one VTCompressionSession, optionally asking for low-latency rate control. */
+  bool openSession(bool low_latency_rate_control, std::string& error) {
+    CFMutableDictionaryRef enc_spec = CFDictionaryCreateMutable(nullptr, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+    if (low_latency_rate_control) {
+      CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableLowLatencyRateControl, kCFBooleanTrue);
+    }
+
+    CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(nullptr, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    int32_t pix_fmt = kCVPixelFormatType_32BGRA;
+    CFNumberRef cf_pix = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pix_fmt);
+    CFDictionaryRef io_props = CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(src_attrs, kCVPixelBufferPixelFormatTypeKey, cf_pix);
+    CFDictionarySetValue(src_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
+    CFRelease(io_props);
+    CFRelease(cf_pix);
+
+    const OSStatus created = VTCompressionSessionCreate(nullptr, config_.width, config_.height, kCMVideoCodecType_H264,
+                                                        enc_spec, src_attrs, nullptr, outputCallback, this, &session_);
+    CFRelease(src_attrs);
+    CFRelease(enc_spec);
+    if (created != noErr || !session_) {
+      session_ = nullptr;
+      error = "VTCompressionSessionCreate failed (" + std::to_string(int(created)) + ")";
+      return false;
+    }
+    return true;
+  }
+
   void destroySession() {
     if (session_) {
       VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
@@ -568,6 +603,8 @@ class VideoToolboxEncoder final : public VideoEncoder {
   std::condition_variable cv_;
   std::deque<EncodeResult> ready_;
   unsigned inflight_ = 0;
+  std::chrono::steady_clock::time_point last_complete_{};
+  bool has_last_complete_ = false;
 };
 }  // namespace
 

@@ -10,19 +10,6 @@ namespace {
 std::mutex cooldown_mutex;
 std::map<std::string, std::chrono::steady_clock::time_point> candidate_cooldowns;
 
-#if defined(__APPLE__) || defined(RELAY_HWENC)
-bool isCoolingDown(const std::string& key, std::chrono::steady_clock::time_point now) {
-  std::lock_guard<std::mutex> lock(cooldown_mutex);
-  const auto it = candidate_cooldowns.find(key);
-  if (it == candidate_cooldowns.end()) return false;
-  if (now >= it->second) {
-    candidate_cooldowns.erase(it);
-    return false;
-  }
-  return true;
-}
-#endif
-
 void markCooldown(const std::string& key, std::chrono::steady_clock::time_point until) {
   std::lock_guard<std::mutex> lock(cooldown_mutex);
   candidate_cooldowns[key] = until;
@@ -37,6 +24,27 @@ const char* encoderStateName(EncoderState state) {
     case EncoderState::hardware_degraded: return "hardware_degraded";
     case EncoderState::software_active: return "software_active";
     case EncoderState::failed: return "failed";
+  }
+  return "unknown";
+}
+
+bool hardwareEncoderCoolingDown(const std::string& key) {
+  std::lock_guard<std::mutex> lock(cooldown_mutex);
+  const auto it = candidate_cooldowns.find(key);
+  if (it == candidate_cooldowns.end()) return false;
+  if (std::chrono::steady_clock::now() >= it->second) {
+    candidate_cooldowns.erase(it);
+    return false;
+  }
+  return true;
+}
+
+const char* transferTierName(TransferTier tier) {
+  switch (tier) {
+    case TransferTier::zero_copy: return "zero_copy";
+    case TransferTier::dirty_upload: return "dirty_upload";
+    case TransferTier::full_upload: return "full_upload";
+    case TransferTier::software: return "software";
   }
   return "unknown";
 }
@@ -64,14 +72,9 @@ std::string extractProfileLevelId(const std::vector<uint8_t>& annex_b) {
 }
 
 std::unique_ptr<VideoEncoder> createHardwareEncoder(const EncoderConfig& config, EncoderReadyCallback on_ready, std::string& error) {
-#if defined(__APPLE__) || defined(RELAY_HWENC)
-  const auto now = std::chrono::steady_clock::now();
-#else
-  (void)config;
-#endif
 #ifdef __APPLE__
   if (config.preference == "auto" || config.preference == "videotoolbox" || config.preference == "h264_videotoolbox") {
-    if (config.preference != "auto" || !isCoolingDown("videotoolbox", now)) {
+    if (config.preference != "auto" || !hardwareEncoderCoolingDown("videotoolbox")) {
       std::string vt_error;
       if (auto vt = createVideoToolboxEncoder(config, on_ready, vt_error)) return vt;
       error = vt_error;
@@ -80,19 +83,20 @@ std::unique_ptr<VideoEncoder> createHardwareEncoder(const EncoderConfig& config,
       error = "videotoolbox in cooldown";
     }
   }
-#else
-  (void)on_ready;
 #endif
 #ifdef RELAY_HWENC
   if (config.preference != "videotoolbox") {
-    if (config.preference != "auto" || !isCoolingDown("libav:" + config.preference, now)) {
+    if (config.preference != "auto" || !hardwareEncoderCoolingDown("libav:auto")) {
       std::string av_error;
-      if (auto av = createLibavEncoder(config, av_error)) return av;
+      if (auto av = createLibavEncoder(config, on_ready, av_error)) return av;
       if (!av_error.empty()) error = av_error;
     } else if (error.empty()) {
       error = "libav hardware encoder in cooldown";
     }
   }
+#elif !defined(__APPLE__)
+  (void)config;
+  (void)on_ready;
 #endif
   if (error.empty()) error = "no hardware encoder available";
   return nullptr;
@@ -171,6 +175,11 @@ void EncoderController::open(const EncoderConfig& config, EncoderReadyCallback o
   consecutive_drops_ = 0;
   consecutive_sw_failures_ = 0;
   hw_recovered_once_ = false;
+  healthy_hw_frames_ = 0;
+  budget_misses_.fill(false);
+  budget_count_ = 0;
+  budget_index_ = 0;
+  budget_miss_total_ = 0;
 
   if (config_.preference != "x264") {
     state_ = EncoderState::probing;
@@ -204,7 +213,21 @@ void EncoderController::open(const EncoderConfig& config, EncoderReadyCallback o
   }
 }
 
+EncoderDecision EncoderController::fallBackFromHardware(const std::string& reason, EncoderAction on_success) {
+  const std::string failed_name = encoder_ ? encoder_->name() : "hardware";
+  state_ = EncoderState::hardware_degraded;
+  markCooldown(failed_name, std::chrono::steady_clock::now() + hardware_cooldown);
+  ++fallback_count_;
+  std::fprintf(stderr, "capture: %s: %s; switching to x264\n", failed_name.c_str(), reason.c_str());
+  std::string sw_error;
+  if (!switchToSoftware(sw_error)) {
+    return {EncoderAction::fatal, false, sw_error.empty() ? reason : sw_error};
+  }
+  return {on_success, true, reason};
+}
+
 EncoderDecision EncoderController::handleHardwareFailure(const std::string& reason) {
+  healthy_hw_frames_ = 0;
   const std::string failed_name = encoder_ ? encoder_->name() : "hardware";
   if (state_ == EncoderState::hardware_active && !hw_recovered_once_ && encoder_) {
     state_ = EncoderState::hardware_degraded;
@@ -219,16 +242,35 @@ EncoderDecision EncoderController::handleHardwareFailure(const std::string& reas
     }
   }
 
-  state_ = EncoderState::hardware_degraded;
-  markCooldown(failed_name, std::chrono::steady_clock::now() + hardware_cooldown);
   markCooldown("libav:auto", std::chrono::steady_clock::now() + hardware_cooldown);
-  ++fallback_count_;
-  std::fprintf(stderr, "capture: %s failed (%s); switching to x264\n", failed_name.c_str(), reason.c_str());
-  std::string sw_error;
-  if (!switchToSoftware(sw_error)) {
-    return {EncoderAction::fatal, false, sw_error.empty() ? reason : sw_error};
+  return fallBackFromHardware(reason, EncoderAction::recover_idr);
+}
+
+EncoderDecision EncoderController::publishHardwareFrame(uint64_t encode_ns) {
+  const uint64_t frame_budget_ns = (1000000000ull * 9) / (10ull * std::max(1u, config_.fps));
+  const bool missed = encode_ns > frame_budget_ns;
+  if (missed) {
+    healthy_hw_frames_ = 0;
+  } else if (healthy_hw_frames_ < recovery_healthy_streak) {
+    if (++healthy_hw_frames_ >= recovery_healthy_streak) hw_recovered_once_ = false;
   }
-  return {EncoderAction::recover_idr, true, reason};
+
+  if (budget_count_ < budget_window_frames) {
+    ++budget_count_;
+  } else {
+    budget_miss_total_ -= budget_misses_[budget_index_];
+  }
+  budget_misses_[budget_index_] = missed;
+  budget_miss_total_ += missed;
+  budget_index_ = (budget_index_ + 1) % budget_window_frames;
+
+  if (config_.preference == "auto" && budget_count_ >= budget_window_frames &&
+      budget_miss_total_ >= budget_miss_threshold) {
+    const auto reason = "encode time exceeded the frame budget on " + std::to_string(budget_miss_total_) +
+                        " of the last " + std::to_string(budget_window_frames) + " frames";
+    return fallBackFromHardware(reason, EncoderAction::publish);
+  }
+  return {EncoderAction::publish, false, {}};
 }
 
 EncoderDecision EncoderController::evaluate(const EncodeResult& result, bool forced_idr) {
@@ -244,9 +286,10 @@ EncoderDecision EncoderController::evaluate(const EncodeResult& result, bool for
           if (!plid.empty()) profile_level_id_ = plid;
         }
         consecutive_drops_ = 0;
-        return {EncoderAction::publish, false, {}};
+        return publishHardwareFrame(result.encode_ns);
       }
       if (result.status == EncodeStatus::dropped) {
+        healthy_hw_frames_ = 0;
         ++dropped_frames_;
         if (forced_idr) {
           return handleHardwareFailure("hardware encoder dropped forced IDR");

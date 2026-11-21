@@ -56,6 +56,7 @@ class X264Encoder final : public VideoEncoder {
 
   const std::string& name() const override { return name_; }
   bool hardware() const override { return false; }
+  TransferTier transferTier() const override { return TransferTier::software; }
   EncoderInput inputFormat() const override { return EncoderInput::nv12; }
   unsigned maxInflight() const override { return 1; }
   unsigned inflight() const override { return unsigned(ready_.size()); }
