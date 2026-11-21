@@ -21,7 +21,7 @@ Install the CLI with `npm install -g screen-relay`, as in [Getting started](/doc
 screen-relay install
 ```
 
-Setup uses MSYS2 at `C:\msys64`. If that folder does not exist, setup creates it with full control for SYSTEM, Administrators, and your account, and read and execute access for Users. It then installs MSYS2 with winget (`winget install MSYS2.MSYS2`). Setup needs permission to create `C:\msys64`; if your account cannot, run the command from an elevated terminal. Without winget, setup stops and asks you to install MSYS2 manually. Setup does not change an existing installation. It uses an existing `C:\msys64` only if it passes the access checks; if it does not, setup stops. Do not change or install over an existing tree.
+Setup uses MSYS2 at `C:\msys64`. If that folder does not exist, setup creates it with full control for SYSTEM, Administrators, and your account, and read and execute access for Users. It then installs MSYS2 with winget (`winget install MSYS2.MSYS2`). Setup needs permission to create `C:\msys64`; if your account cannot, run the command from an elevated terminal. Without winget, setup stops and asks you to install MSYS2 manually. Setup does not change the access rules of an existing installation; it only adds the packages it needs with pacman. It uses an existing `C:\msys64` only if it passes the access checks; if it does not, setup stops. Do not change or install over an existing tree.
 
 ### Install MSYS2 manually
 
