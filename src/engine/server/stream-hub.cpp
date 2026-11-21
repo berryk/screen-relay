@@ -1,6 +1,7 @@
 #include "stream-hub.hpp"
 #include <algorithm>
 #include <chrono>
+#include <tuple>
 #include <utility>
 
 namespace relay {
@@ -9,6 +10,16 @@ using Clock = std::chrono::steady_clock;
 
 uint64_t nowUs() {
   return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
+}
+
+bool healthyRtcController(const StreamHub::Subscriber& sub, uint64_t now_us) {
+  return sub.sinks.frame && sub.role != SubscriberRole::watch && sub.flow.acknowledged &&
+      !sub.flow.paused(now_us) && !sub.flow.timedOut(now_us);
+}
+
+void dropOldestRtcFrame(FlowControl& flow) {
+  flow.bytes -= flow.frames.front().bytes;
+  flow.frames.pop_front();
 }
 }  // namespace
 
@@ -69,6 +80,7 @@ void StreamHub::stop() {
       sub->pending_cursor.reset();
       sub->flow.reset();
       sub->wire_to_encoder_seq.clear();
+      sub->sinks = {};
     }
     subscribers_.clear();
     state_ = HubState::stopped;
@@ -84,14 +96,19 @@ uint32_t StreamHub::nextGenerationLocked() {
 }
 
 uint64_t StreamHub::driverIdLocked(uint64_t now_us) const {
+  uint64_t healthy_rtc_controller = 0;
   uint64_t healthy_streaming_watch = 0;
   uint64_t healthy_watch = 0;
   uint64_t fallback_rtc = 0;
   uint64_t fallback_watch = 0;
   for (const auto& sub : subscribers_) {
     if (!sub || sub->state == ViewerState::disconnected || sub->state == ViewerState::closing || sub->failed) continue;
-    if (sub->role == SubscriberRole::controller) return sub->id;
-    if (sub->role == SubscriberRole::watch) {
+    if (sub->sinks.frame) {
+      if (!healthy_rtc_controller && healthyRtcController(*sub, now_us)) healthy_rtc_controller = sub->id;
+      if (!fallback_rtc) fallback_rtc = sub->id;
+    } else if (sub->role == SubscriberRole::controller) {
+      return sub->id;
+    } else if (sub->role == SubscriberRole::watch) {
       if (!fallback_watch) fallback_watch = sub->id;
       const bool blocked = sub->flow.paused(now_us) || sub->flow.timedOut(now_us) ||
                            sub->flow.frames.size() >= sub->flow.window;
@@ -99,10 +116,9 @@ uint64_t StreamHub::driverIdLocked(uint64_t now_us) const {
         if (!healthy_watch) healthy_watch = sub->id;
         if (sub->state == ViewerState::streaming && !healthy_streaming_watch) healthy_streaming_watch = sub->id;
       }
-    } else if (sub->role == SubscriberRole::rtc && !fallback_rtc) {
-      fallback_rtc = sub->id;
     }
   }
+  if (healthy_rtc_controller) return healthy_rtc_controller;
   if (healthy_streaming_watch) return healthy_streaming_watch;
   if (healthy_watch) return healthy_watch;
   if (fallback_rtc) return fallback_rtc;
@@ -135,7 +151,7 @@ void StreamHub::pushDriverFlowLocked(uint64_t now_us, uint64_t driver_id, uint32
   for (const auto& sub : subscribers_) {
     if (sub->id != driver_id) continue;
     enc_gen = encoder_generation_;
-    if (sub->role == SubscriberRole::rtc) {
+    if (sub->sinks.frame && !healthyRtcController(*sub, now_us)) {
       window = 4;
       bitrate = settings_.start_bitrate;
       paused = false;
@@ -155,13 +171,13 @@ void StreamHub::pushDriverFlowLocked(uint64_t now_us, uint64_t driver_id, uint32
 }
 
 std::shared_ptr<StreamHub::Subscriber> StreamHub::attach(SubscriberRole role, uint32_t viewer_generation,
-                                                         bool clipboard_notices, RtcSink rtc_sink) {
+                                                         bool clipboard_notices, SubscriberSinks sinks) {
   auto sub = std::make_shared<Subscriber>();
   sub->role = role;
   sub->state = ViewerState::awaiting_idr;
   sub->generation = viewer_generation;
   sub->clipboard_notices = clipboard_notices;
-  sub->rtc_sink = std::move(rtc_sink);
+  sub->sinks = std::move(sinks);
   const uint64_t now = nowUs();
   sub->attached_us = now;
   sub->awaiting_idr_since_us = now;
@@ -236,7 +252,7 @@ void StreamHub::detach(uint64_t subscriber_id) {
       (*it)->pending_cursor.reset();
       (*it)->flow.reset();
       (*it)->wire_to_encoder_seq.clear();
-      (*it)->rtc_sink = nullptr;
+      (*it)->sinks = {};
       subscribers_.erase(it);
       break;
     }
@@ -278,31 +294,43 @@ bool StreamHub::onFrame(std::shared_ptr<const EncodedFrame> frame) {
   unsigned window = 1;
   uint64_t bitrate = settings_.start_bitrate, admit_until = 0;
   bool paused = false, push_flow = false;
-  std::vector<std::pair<RtcSink, std::shared_ptr<const EncodedFrame>>> rtc_deliveries;
+  std::vector<std::tuple<RtcSink, uint32_t, uint32_t>> rtc_deliveries;
   bool notify_ws = false;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != HubState::streaming || frame->generation != encoder_generation_) return false;
-    last_encoder_seq_ = frame->sequence;
     const uint64_t now = nowUs();
     const uint64_t prev_driver = active_driver_id_;
     const uint64_t driver_id = driverIdLocked(now);
     if (driver_id != prev_driver) {
       active_driver_id_ = driver_id;
+      ack_now = last_encoder_seq_ > 0;
+      ack_gen = frame->generation;
+      ack_seq = last_encoder_seq_;
       pushDriverFlowLocked(now, driver_id, flow_gen, window, bitrate, paused, admit_until, push_flow);
     }
 
+    last_encoder_seq_ = frame->sequence;
     bool driver_enqueued = false;
     for (auto& sub : subscribers_) {
       if (!sub || sub->state == ViewerState::disconnected || sub->state == ViewerState::closing || sub->failed) continue;
-      if (sub->role == SubscriberRole::rtc) {
+      if (sub->sinks.frame) {
         if (sub->state == ViewerState::awaiting_idr) {
           if (!frame->keyframe) continue;
           sub->state = ViewerState::streaming;
           sub->awaiting_idr_since_us = 0;
         }
-        if (sub->rtc_sink) rtc_deliveries.emplace_back(sub->rtc_sink, frame);
+        const uint32_t wire_seq = ++sub->wire_sequence;
+        sub->wire_to_encoder_seq.emplace_back(wire_seq, frame->sequence);
+        if (sub->wire_to_encoder_seq.size() > FlowControl::max_frames) sub->wire_to_encoder_seq.pop_front();
+        const size_t bytes = std::clamp<size_t>(frame->annex_b.size(), 1, FlowControl::max_bytes);
+        while (!sub->flow.enqueue(wire_seq, bytes, frame->pts_us, now) && !sub->flow.frames.empty()) {
+          dropOldestRtcFrame(sub->flow);
+        }
+        sub->flow.sent(wire_seq, now);
+        rtc_deliveries.emplace_back(sub->sinks.frame, sub->generation, wire_seq);
+        if (sub->id == driver_id && healthyRtcController(*sub, now)) driver_enqueued = true;
         continue;
       }
 
@@ -343,9 +371,7 @@ bool StreamHub::onFrame(std::shared_ptr<const EncodedFrame> frame) {
     }
   }
 
-  for (auto& delivery : rtc_deliveries) {
-    delivery.first(delivery.second);
-  }
+  for (const auto& [sink, generation, sequence] : rtc_deliveries) sink(frame, generation, sequence);
   if (ack_now) capture_.acknowledge(ack_gen, ack_seq);
   if (push_flow) capture_.setFlowControl(flow_gen, window, bitrate, paused, admit_until);
   if (request_idr) capture_.requestKeyframe();
@@ -354,17 +380,41 @@ bool StreamHub::onFrame(std::shared_ptr<const EncodedFrame> frame) {
 }
 
 void StreamHub::onCursor(uint32_t encoder_gen, CursorImage&& cursor) {
-  bool notify = false;
+  std::vector<std::pair<uint32_t, decltype(SubscriberSinks::cursor)>> rtc_deliveries;
+  bool notify_ws = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != HubState::streaming || encoder_gen != encoder_generation_) return;
     for (auto& sub : subscribers_) {
-      if (!sub || sub->role == SubscriberRole::rtc || sub->state == ViewerState::disconnected || sub->state == ViewerState::closing) continue;
-      sub->pending_cursor = cursor;
-      notify = true;
+      if (!sub || sub->state == ViewerState::disconnected || sub->state == ViewerState::closing || sub->failed) continue;
+      if (sub->sinks.frame) {
+        if (sub->sinks.cursor) rtc_deliveries.emplace_back(sub->generation, sub->sinks.cursor);
+      } else {
+        sub->pending_cursor = cursor;
+        notify_ws = true;
+      }
     }
   }
-  if (notify && wake_) wake_();
+  for (const auto& [generation, sink] : rtc_deliveries) sink(generation, cursor);
+  if (notify_ws && wake_) wake_();
+}
+
+void StreamHub::notifyClipboard() {
+  std::vector<std::pair<uint32_t, decltype(SubscriberSinks::clipboard)>> rtc_deliveries;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& sub : subscribers_) {
+      if (!sub || !sub->clipboard_notices || sub->state == ViewerState::disconnected ||
+          sub->state == ViewerState::closing || sub->failed) continue;
+      if (sub->sinks.frame) {
+        if (sub->sinks.clipboard) rtc_deliveries.emplace_back(sub->generation, sub->sinks.clipboard);
+      } else {
+        sub->clipboard_pending = true;
+      }
+    }
+  }
+  for (const auto& [generation, sink] : rtc_deliveries) sink(generation);
+  if (wake_) wake_();
 }
 
 void StreamHub::updateFlow(const std::shared_ptr<Subscriber>& sub, uint64_t now_us,
@@ -384,7 +434,7 @@ void StreamHub::updateFlow(const std::shared_ptr<Subscriber>& sub, uint64_t now_
       out_lowat = 0;
       return;
     }
-    if (sample) sub->flow.sampleTransport(*sample, now_us);
+    if (sample && !sub->sinks.frame) sub->flow.sampleTransport(*sample, now_us);
     else sub->flow.clearTransport();
     sub->flow.update(now_us);
     out_window = sub->flow.window;
@@ -403,6 +453,10 @@ void StreamHub::updateFlow(const std::shared_ptr<Subscriber>& sub, uint64_t now_
       }
       pushDriverFlowLocked(now_us, next_driver, enc_gen, window, bitrate, paused, admit_until, push_flow);
     } else if (sub->id == active_driver_id_) {
+      if (sub->sinks.frame && !healthyRtcController(*sub, now_us) && state_ == HubState::streaming) {
+        ack_enc_gen = encoder_generation_;
+        ack_enc_seq = last_encoder_seq_;
+      }
       pushDriverFlowLocked(now_us, active_driver_id_, enc_gen, window, bitrate, paused, admit_until, push_flow);
     }
   }
@@ -425,7 +479,14 @@ bool StreamHub::acknowledge(const std::shared_ptr<Subscriber>& sub, uint32_t vie
   bool paused = false, push_flow = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!sub || sub->generation != viewer_generation || !sequence) return false;
+    if (!sub || sub->state == ViewerState::disconnected || sub->generation != viewer_generation || !sequence) return false;
+    if (sub->sinks.frame) {
+      const auto it = std::find_if(sub->flow.frames.begin(), sub->flow.frames.end(), [sequence](const auto& frame) {
+        return frame.sequence == sequence && frame.sent;
+      });
+      if (it == sub->flow.frames.end()) return false;
+      while (sub->flow.frames.front().sequence != sequence) dropOldestRtcFrame(sub->flow);
+    }
     accepted = sub->flow.ack(sequence, now_us, wait_us);
     if (accepted) {
       uint32_t mapped = 0;
@@ -444,6 +505,7 @@ bool StreamHub::acknowledge(const std::shared_ptr<Subscriber>& sub, uint32_t vie
       } else if (sub->id == active_driver_id_ && mapped > 0) {
         ack_enc_gen = encoder_generation_;
         ack_enc_seq = mapped;
+        if (sub->sinks.frame) pushDriverFlowLocked(now_us, active_driver_id_, flow_gen, window, bitrate, paused, admit_until, push_flow);
       }
     }
   }

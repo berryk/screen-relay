@@ -34,6 +34,11 @@ class FakeSource final : public relay::CaptureSource {
   std::pair<int, int> dimensions() const override { return {640, 360}; }
   bool drainDamage() override { return s_->wake.consume(); }
   relay::PixelFormat pixelFormat() const override { return relay::PixelFormat::BGRA; }
+  bool cursorSupported() const override { return true; }
+  std::optional<relay::CursorImage> cursor(bool force) override {
+    if (!force) return std::nullopt;
+    return relay::CursorImage{1, 1, 0, 0, {0x12, 0x34, 0x56, 0xff}};
+  }
   relay::FrameView capture() override {
     ++s_->captures;
     const uint8_t v = s_->shade.load();
@@ -84,7 +89,7 @@ int main() {
   require(hub.state() == HubState::idle, "started hub must be idle");
   require(src->captures == 0, "idle hub must not capture");
 
-  auto ctrl = hub.attach(SubscriberRole::controller, 10, false);
+  auto ctrl = hub.attach(SubscriberRole::controller, 10, true);
   require(ctrl && hub.state() == HubState::streaming && hub.subscriberCount() == 1, "controller attach failed");
   ViewerPacket p1;
   require(waitPacket(hub, ctrl, p1), "controller did not receive initial IDR");
@@ -107,23 +112,51 @@ int main() {
 
   std::mutex rtc_mtx;
   std::condition_variable rtc_cv;
-  std::vector<std::shared_ptr<const EncodedFrame>> rtc_frames;
-  auto rtc = hub.attach(SubscriberRole::rtc, 12, false, [&](const std::shared_ptr<const EncodedFrame>& f) {
-    {
-      std::lock_guard<std::mutex> lock(rtc_mtx);
-      rtc_frames.push_back(f);
-    }
-    rtc_cv.notify_all();
+  std::vector<std::pair<uint32_t, ViewerPacket>> rtc_frames;
+  std::optional<std::pair<uint32_t, CursorImage>> rtc_cursor;
+  uint32_t rtc_clipboard_gen = 0;
+  auto rtc = hub.attach(SubscriberRole::rtc, 12, true, {
+      [&](const std::shared_ptr<const EncodedFrame>& frame, uint32_t generation, uint32_t sequence) {
+        require(hub.subscriberCount() > 0, "rtc frame callback could not inspect subscribers");
+        {
+          std::lock_guard<std::mutex> lock(rtc_mtx);
+          rtc_frames.emplace_back(generation, ViewerPacket{sequence, frame});
+        }
+        rtc_cv.notify_all();
+      },
+      [&](uint32_t generation, const CursorImage& cursor) {
+        require(hub.state() == HubState::streaming, "rtc cursor callback could not inspect hub state");
+        {
+          std::lock_guard<std::mutex> lock(rtc_mtx);
+          rtc_cursor.emplace(generation, cursor);
+        }
+        rtc_cv.notify_all();
+      },
+      [&](uint32_t generation) {
+        require(hub.state() == HubState::streaming, "rtc clipboard callback could not inspect hub state");
+        rtc_clipboard_gen = generation;
+      },
   });
   require(rtc && hub.subscriberCount() == 3, "rtc attach failed");
+  hub.notifyClipboard();
+  require(rtc_clipboard_gen == 12 && ctrl->clipboard_pending && !watch->clipboard_pending,
+          "clipboard notices did not reach the opted-in RTC and WebSocket viewers");
   src->shade = 180;
   src->damage();
 
   {
     std::unique_lock<std::mutex> lock(rtc_mtx);
-    require(rtc_cv.wait_for(lock, 3000ms, [&] { return !rtc_frames.empty(); }), "rtc did not receive frame");
-    require(rtc_frames.front()->keyframe, "first rtc frame must be IDR");
+    require(rtc_cv.wait_for(lock, 3000ms, [&] { return !rtc_frames.empty() && rtc_cursor; }),
+            "rtc did not receive frame and cursor");
+    const auto& [generation, packet] = rtc_frames.front();
+    require(generation == 12 && packet.sequence == 1 && packet.frame && packet.frame->keyframe,
+            "rtc first frame must be an IDR with its own generation and sequence");
+    require(rtc_cursor->first == 12 && rtc_cursor->second.rgba == std::vector<uint8_t>{0x12, 0x34, 0x56, 0xff},
+            "rtc cursor callback did not receive viewer generation and RGBA payload");
   }
+  require(!hub.acknowledge(rtc, 11, 1, nowUs(), 0), "rtc accepted an ACK for another viewer generation");
+  require(hub.acknowledge(rtc, 12, 1, nowUs(), 0), "rtc could not acknowledge a frame without a socket write");
+  require(!hub.acknowledge(rtc, 12, 1, nowUs(), 0), "rtc accepted a duplicate ACK");
 
   hub.detach(ctrl->id);
   require(hub.state() == HubState::streaming && hub.subscriberCount() == 2, "detach controller broke streaming");
@@ -136,6 +169,18 @@ int main() {
   require(hub.acknowledge(watch, 11, w_after.sequence, nowUs(), 0), "ack watch after handoff failed");
 
   hub.detach(watch->id);
+  auto nextRtcSequence = [&] {
+    std::unique_lock<std::mutex> lock(rtc_mtx);
+    const uint32_t previous = rtc_frames.back().second.sequence;
+    hub.requestKeyframe();
+    require(rtc_cv.wait_for(lock, 3000ms, [&] { return rtc_frames.back().second.sequence > previous; }),
+            "rtc-only stream stalled while waiting for another frame");
+    return rtc_frames.back().second.sequence;
+  };
+  const uint32_t skipped = nextRtcSequence();
+  const uint32_t latest = nextRtcSequence();
+  require(hub.acknowledge(rtc, 12, latest, nowUs(), 100), "rtc could not acknowledge after skipping a frame");
+  require(!hub.acknowledge(rtc, 12, skipped, nowUs(), 0), "rtc accepted an ACK older than the last ACK");
   hub.detach(rtc->id);
   require(hub.state() == HubState::idle && hub.subscriberCount() == 0, "hub did not return to idle");
 

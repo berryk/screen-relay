@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
   const auto stats = s.hub.stats();
   std::cerr << "capture_stats encoder=" << stats.encoder
             << " state=" << stats.encoder_state
+            << " transfer=" << relay::transferTierName(stats.transfer_tier)
             << " captures=" << stats.captures
             << " encoded=" << stats.encoded
             << " dropped=" << stats.dropped_frames

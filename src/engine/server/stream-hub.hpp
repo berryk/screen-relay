@@ -38,7 +38,13 @@ struct ViewerPacket {
 class StreamHub {
  public:
   using WakeCallback = std::function<void()>;
-  using RtcSink = std::function<void(const std::shared_ptr<const EncodedFrame>&)>;
+  using RtcSink = std::function<void(const std::shared_ptr<const EncodedFrame>&, uint32_t generation, uint32_t sequence)>;
+
+  struct SubscriberSinks {
+    RtcSink frame;
+    std::function<void(uint32_t generation, const CursorImage&)> cursor;
+    std::function<void(uint32_t generation)> clipboard;
+  };
 
   struct Subscriber {
     uint64_t id = 0;
@@ -62,7 +68,7 @@ class StreamHub {
     uint64_t flow_timer_due_us = 0;
     std::vector<uint8_t> received;
     std::deque<std::pair<uint32_t, uint32_t>> wire_to_encoder_seq;
-    RtcSink rtc_sink;
+    SubscriberSinks sinks;
   };
 
   StreamHub(CaptureSettings settings, CaptureSourceFactory factory, WakeCallback wake,
@@ -78,7 +84,7 @@ class StreamHub {
 
   /** Attaches a subscriber; transitions idle -> streaming on first attach, or requests an IDR on join. */
   std::shared_ptr<Subscriber> attach(SubscriberRole role, uint32_t viewer_generation, bool clipboard_notices,
-                                     RtcSink rtc_sink = {});
+                                     SubscriberSinks sinks = {});
   /** Detaches a subscriber; seamlessly hands off flow control or transitions streaming -> idle when empty. */
   void detach(uint64_t subscriber_id);
 
@@ -93,6 +99,7 @@ class StreamHub {
 
   /** Requests an IDR on the shared encoder without restarting the capture session. */
   void requestKeyframe();
+  void notifyClipboard();
 
   /** Pops the next cursor or video packet ready to write for sub; returns false if nothing is queued. */
   bool popOutbound(const std::shared_ptr<Subscriber>& sub, std::optional<ViewerPacket>& packet,
