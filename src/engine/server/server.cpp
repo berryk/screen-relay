@@ -1039,7 +1039,8 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
             sinks.clipboard = [weak_rtc](uint32_t generation) {
               if (auto locked = weak_rtc.lock()) locked->pushClipboardNotice(generation);
             };
-            auto sub = s->hub.attach(SubscriberRole::rtc, ++s->nextGeneration, offer_grant_id == 0, std::move(sinks));
+            const SubscriberRole role = offer_can_input ? SubscriberRole::rtc : SubscriberRole::watch;
+            auto sub = s->hub.attach(role, ++s->nextGeneration, offer_grant_id == 0, std::move(sinks));
             if (!sub) {
               finished->close();
               const std::string body = "{\"error\":\"capture_unavailable\"}";
@@ -1052,11 +1053,22 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
               if (admission.replace) {
                 auto replace = std::find_if(s->rtc.active.begin(), s->rtc.active.end(),
                     [offer_grant_id](const Server::ActiveRtcSession& active) {
-                      return !offer_grant_id || active.grant_id == offer_grant_id;
+                      return offer_grant_id ? active.grant_id == offer_grant_id : active.grant_id != 0;
                     });
-                if (replace != s->rtc.active.end()) s->closeActiveRtc(size_t(replace - s->rtc.active.begin()));
-                else for (auto& slot : s->viewers) {
-                  if (slot.viewer) { auto* old = slot.viewer; s->evict(old); s->endStream(old, false); break; }
+                if (replace == s->rtc.active.end() && !offer_grant_id) {
+                  replace = s->rtc.active.begin();
+                }
+                if (replace != s->rtc.active.end()) {
+                  s->closeActiveRtc(size_t(replace - s->rtc.active.begin()));
+                } else {
+                  lws* victim = nullptr;
+                  for (auto& slot : s->viewers) {
+                    if (!slot.viewer) continue;
+                    const auto* r = static_cast<HttpResponse*>(lws_wsi_user(slot.viewer));
+                    if (!offer_grant_id && r && r->grant_id) { victim = slot.viewer; break; }
+                    if (!victim) victim = slot.viewer;
+                  }
+                  if (victim) { s->evict(victim); s->endStream(victim, false); }
                 }
               }
               const uint64_t session_id = ++s->rtc.next_session_id;
