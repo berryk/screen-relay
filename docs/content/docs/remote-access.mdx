@@ -157,7 +157,7 @@ Neither scope can read or set the clipboard, take a screenshot over HTTP, send `
    curl -s -X DELETE -H "Authorization: Bearer $(cat ./token)" "https://desktop.example.com/grants/ID"
    ```
 
-Add `connections=1` to create a grant that opens only one WebSocket, such as `?ttl=120&connections=1`. Its connection stays open, and a copied link stops working once the grant has been used.
+Add `connections=1` to create a grant that opens only one WebSocket, such as `?ttl=120&connections=1`. Its connection stays open, and once the grant has been used, a copied link fails to connect: the engine refuses its WebSocket handshake.
 
 When a grant is revoked or expires, the engine closes the connections opened with it and refuses new ones. Other viewers and clients stay connected. Grants are kept in memory, so `screen-relay down` ends them all.
 

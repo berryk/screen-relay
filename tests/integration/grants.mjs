@@ -196,7 +196,8 @@ assert.equal(single.expires_in, 60);
 assert.ok(!(await opens('/control', single.token, 'null')), 'a single watch grant opened /control');
 const only = await connect(watchPath, single.token, 'null');
 assert.ok(only, 'the single-connection grant did not open its connection');
-assert.ok(!(await opens(watchPath, single.token, 'null')), 'a single-connection grant opened a second connection');
+// A used single-connection grant is refused at the handshake, with no 101 upgrade.
+assert.equal(await connect(watchPath, single.token, 'null'), null, 'a used single-connection grant got past the handshake');
 await sleep(800);
 assert.ok(!only.closed, 'a refused second connection closed the first');
 assert.equal((await request('DELETE', `/grants/${single.id}`, token)).status, 200);
