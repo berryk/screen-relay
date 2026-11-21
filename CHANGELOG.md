@@ -1,8 +1,31 @@
 # screen-relay
 
-## 0.1.3
+## 0.1.4
 
 <!-- release:start -->
+
+### New Features
+
+- Added **single-connection grants**: `POST /grants/watch` and `POST /grants/control` take `connections=1` for a grant that opens one WebSocket. Its connection stays open, and every later handshake with the grant is refused (#98)
+- Added the **Vercel Sandbox image** back, with a prebuilt engine distributed under GPL-3.0 because it links x264. The image carries the license texts, x264's notices, and the exact sources of both (#96)
+
+### Improvements
+
+- **Grant WebSockets connect from any page origin**, `Origin: null` included, so viewers embedded in MCP App hosts on opaque or per-load origins can connect. The session token and HTTP requests keep the `--allow-origin` check (#98)
+- **Grant requests** reject an oversized query parameter with `invalid_query` and a repeated or invalid `connections` with `invalid_connections`, instead of ignoring the rest of the query (#98)
+
+### Documentation
+
+- Added the **GPL-3.0 text** in `LICENSES/GPL-3.0.txt` for the prebuilt engine, and noted it in the README and third-party notices (#96)
+
+### Contributors
+
+- @joshuasoup
+- @lahfir
+
+<!-- release:end -->
+
+## 0.1.3
 
 ### New Features
 
@@ -26,8 +49,6 @@
 ### Contributors
 
 - @lahfir
-
-<!-- release:end -->
 
 ## 0.1.2
 
