@@ -35,7 +35,7 @@ constexpr Candidate candidates[] = {
 #if defined(__APPLE__)
   {"h264_videotoolbox", AV_HWDEVICE_TYPE_NONE, false, "realtime=1:prio_speed=1:allow_sw=0", nullptr},
 #else
-  {"h264_nvenc", AV_HWDEVICE_TYPE_NONE, true, "preset=p1:tune=ull:rc=cbr:delay=0:zerolatency=1:forced-idr=1", nullptr},
+  {"h264_nvenc", AV_HWDEVICE_TYPE_NONE, true, "preset=p4:tune=ll:rc=vbr:spatial-aq=1:aq-strength=8:delay=0:zerolatency=1:forced-idr=1", "preset=p1:tune=ll:rc=vbr:delay=0:zerolatency=1:forced-idr=1"},
 #if defined(_WIN32)
   {"h264_qsv", AV_HWDEVICE_TYPE_NONE, true, "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1:low_power=1", "preset=veryfast:forced_idr=1:async_depth=1:low_delay_brc=1"},
   {"h264_amf", AV_HWDEVICE_TYPE_NONE, false, "usage=ultralowlatency:rc=cbr:forced_idr=1:latency=1:async_depth=1:frame_skipping=0:filler_data=0", "usage=lowlatency:rc=cbr:forced_idr=1:async_depth=1"},
@@ -45,6 +45,13 @@ constexpr Candidate candidates[] = {
 #endif
 #endif
 };
+
+/** Computes a low-latency VBV buffer size in bits with enough headroom for keyframes at high frame rates. */
+int libavVbvBufferBits(uint64_t bitrate, unsigned fps) {
+  const uint64_t per_frame_window = 4 * bitrate / std::max(1u, fps);
+  const uint64_t half_second = bitrate / 2;
+  return int(std::clamp<uint64_t>(std::max(per_frame_window, half_second), 16 * 1024, uint64_t(INT_MAX)));
+}
 
 std::string avError(int code) {
   char text[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -142,7 +149,7 @@ class LibavEncoder final : public VideoEncoder {
       changed_ = now;
       if (candidate_ && candidate_->dynamic_bitrate) {
         context_->bit_rate = context_->rc_max_rate = int64_t(rate);
-        context_->rc_buffer_size = int(std::min<uint64_t>(INT_MAX, 4 * rate / std::max(1u, config_.fps)));
+        context_->rc_buffer_size = libavVbvBufferBits(rate, config_.fps);
       } else {
         std::string reopen_error;
         if (!openWithFallback(reopen_error)) {
@@ -267,7 +274,7 @@ class LibavEncoder final : public VideoEncoder {
     context_->flags |= AV_CODEC_FLAG_LOW_DELAY | AV_CODEC_FLAG_CLOSED_GOP;
     context_->flags2 |= AV_CODEC_FLAG2_FAST;
     context_->bit_rate = context_->rc_max_rate = int64_t(bitrate_);
-    context_->rc_buffer_size = int(std::min<uint64_t>(INT_MAX, 4 * bitrate_ / std::max(1u, config_.fps)));
+    context_->rc_buffer_size = libavVbvBufferBits(bitrate_, config_.fps);
     context_->color_range = AVCOL_RANGE_MPEG;
     context_->colorspace = AVCOL_SPC_BT709;
     context_->color_primaries = AVCOL_PRI_BT709;

@@ -352,12 +352,56 @@ static void zeroCopyRefinementPreservesImage() {
   av_packet_free(&packet); av_frame_free(&frame); avcodec_free_context(&decoder);
 }
 #endif
+class BufferedDamageSource final : public relay::CaptureSource {
+  std::shared_ptr<SourceState> state;
+  int width, height;
+  std::vector<uint8_t> frame;
+  std::atomic<bool> buffered_dirty{false};
+ public:
+  BufferedDamageSource(std::shared_ptr<SourceState> s, int w, int h)
+      : state(std::move(s)), width(w), height(h), frame(size_t(w) * h * 4) {}
+  relay::WaitHandle fd() const override { return state->wake.handle(); }
+  std::pair<int, int> dimensions() const override { return {width, height}; }
+  bool drainDamage() override {
+    state->wake.consume();
+    return buffered_dirty.exchange(false);
+  }
+  relay::PixelFormat pixelFormat() const override { return relay::PixelFormat::BGRA; }
+  relay::FrameView capture() override {
+    const unsigned count = ++state->captures;
+    const bool red = count > 1;
+    for (size_t i = 0; i < frame.size(); i += 4) {
+      frame[i] = red ? 48 : 96;
+      frame[i + 1] = red ? 64 : 176;
+      frame[i + 2] = red ? 192 : 32;
+      frame[i + 3] = 255;
+    }
+    if (count == 1) buffered_dirty.store(true);
+    return {frame.data(), width * 4, width, height, relay::PixelFormat::BGRA};
+  }
+};
+static void bufferedDamageDrainedWithoutWake() {
+  auto state = std::make_shared<SourceState>(); Frames frames;
+  relay::CaptureEncoder encoder([&](std::shared_ptr<const relay::EncodedFrame> f) { return frames.publish(std::move(f)); },
+      capture_settings, [state] { return std::make_unique<BufferedDamageSource>(state, 640, 360); });
+  std::string error; require(encoder.start(error), error.c_str());
+  encoder.beginSession(23);
+  encoder.setFlowControl(23, 2, 8000000, false, 0);
+  const auto first = frames.at(0);
+  require(first.generation == 23 && first.sequence == 1 && first.keyframe, "initial frame missing");
+  const auto second = frames.at(1);
+  require(second.generation == 23 && second.sequence == 2 && !second.keyframe,
+          "buffered damage frame was not encoded without fd wake");
+  require(state->captures >= 2, "buffered damage did not trigger a second capture");
+  encoder.stop();
+}
 int main() {
   try {
     healthySource(); runtimeSize(1920, 1080); runtimeSize(1366, 768); runtimeSize(3840, 2160);
     runtimeSize(1280, 720, 120);
     fullScreenDamage(1920, 1080); fullScreenDamage(1366, 768);
     identicalDamageRefines(); invalidSource(1); invalidSource(2);
+    bufferedDamageDrainedWithoutWake();
 #ifdef __APPLE__
     zeroCopyRefinementPreservesImage();
 #endif

@@ -431,6 +431,7 @@ struct CaptureEncoder::Impl {
       };
 
       while (true) {
+        if (source->drainDamage()) dirty = true;
         drain_results(false);
 
         uint32_t gen = 0;
@@ -638,7 +639,6 @@ struct CaptureEncoder::Impl {
         }
         const WaitReady ready_events = wait(damage_fd, wake_event, timeout_ns);
         if (ready_events.wake) wake_event.consume();
-        if (ready_events.source && source->drainDamage()) dirty = true;
       }
 
       std::vector<EncodeResult> final_discard;
