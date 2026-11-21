@@ -75,7 +75,8 @@ Server::ViewerSlot* Server::slotFor(lws* wsi) {
 
 bool Server::holdsInput() const {
 #ifdef RELAY_RTC
-  return control || input_viewer || rtc.active_owns_input;
+  return control || input_viewer || std::any_of(rtc.active.begin(), rtc.active.end(),
+      [](const ActiveRtcSession& session) { return session.owns_input; });
 #else
   return control || input_viewer;
 #endif
@@ -100,18 +101,24 @@ ConnectionPlan Server::planConnection(Socket socket, bool grant) {
   bool inputViewerHasGrant = false;
   wsViewerCounts(count, grantCount, inputViewerHasGrant);
 #ifdef RELAY_RTC
-  if (rtc.hasActive()) {
+  bool rtc_owns_input = false;
+  for (const auto& active : rtc.active) {
     ++count;
-    if (rtc.active_grant_id) ++grantCount;
-    if (rtc.active_owns_input && !input_viewer) inputViewerHasGrant = (rtc.active_grant_id != 0);
-  } else if (rtc.hasOffer()) {
-    ++count;
-    if (rtc.pending_grant_id) ++grantCount;
+    if (active.grant_id) ++grantCount;
+    if (active.owns_input) { rtc_owns_input = true; inputViewerHasGrant = active.grant_id != 0; }
   }
-  const bool stream_owns_input = input_viewer != nullptr || rtc.active_owns_input;
+  if (rtc.hasOffer()) {
+    ++count;
+    if (rtc.offer.grant_id) ++grantCount;
+  }
+  const bool stream_owns_input = input_viewer != nullptr || rtc_owns_input;
 #else
   const bool stream_owns_input = input_viewer != nullptr;
 #endif
+  if (control && grant && socket == Socket::take) {
+    const auto* owner = static_cast<HttpResponse*>(lws_wsi_user(control));
+    if (!owner || !owner->grant_id) return {};
+  }
   return connectionPlan(socket, count, stream_owns_input, control != nullptr, grantCount, grant, inputViewerHasGrant);
 }
 
@@ -120,38 +127,44 @@ RtcAdmission Server::planRtcAdmission(uint64_t callerGrantId) const {
   size_t wsCount = 0, wsGrantCount = 0;
   bool inputViewerHasGrant = false;
   wsViewerCounts(wsCount, wsGrantCount, inputViewerHasGrant);
-  return rtcAdmission(wsCount, wsGrantCount, rtc.hasActive(), rtc.active_grant_id, callerGrantId);
+  size_t rtcGrantCount = 0;
+  bool replaceable = false;
+  for (const auto& active : rtc.active) {
+    if (active.grant_id) ++rtcGrantCount;
+    if (callerGrantId && active.grant_id == callerGrantId) replaceable = true;
+  }
+  return rtcAdmission(wsCount, wsGrantCount, rtc.active.size(), rtcGrantCount, callerGrantId, replaceable);
 }
 
 void Server::abortPendingRtc(bool evictClient, uint16_t code, const char* reason) {
-  if (rtc.pending) {
-    rtc.pending->close();
-    rtc.pending.reset();
-  }
-  lws* client = rtc.offer_client;
-  rtc.offer_client = nullptr;
-  rtc.offer_stage = RtcOfferStage::none;
-  rtc.pending_can_input = false;
-  rtc.pending_grant_id = 0;
-  if (evictClient && client) {
-    evict(client, code, reason);
-  }
+  if (rtc.offer.session) rtc.offer.session->close();
+  lws* client = rtc.offer.client;
+  rtc.offer = {};
+  if (evictClient && client) evict(client, code, reason);
 }
 
-void Server::closeActiveRtc() {
-  if (rtc.active_subscriber_id) {
-    hub.detach(rtc.active_subscriber_id);
-    rtc.active_subscriber_id = 0;
-  }
-  if (rtc.active_owns_input) {
+void Server::closeActiveRtc(size_t index) {
+  auto active = std::move(rtc.active[index]);
+  rtc.active.erase(rtc.active.begin() + index);
+  if (active.subscriber_id) hub.detach(active.subscriber_id);
+  if (active.owns_input) {
     release();
     if (input) input->cancel();
-    rtc.active_owns_input = false;
   }
-  rtc.active_grant_id = 0;
-  if (rtc.active) {
-    rtc.active->close();
-    rtc.active.reset();
+  if (active.session) active.session->close();
+}
+
+void Server::assignRtcInput() {
+  if (holdsInput()) return;
+  const auto now = Grants::Clock::now();
+  for (int pass = 0; pass < 2; ++pass) {
+    for (auto it = rtc.active.rbegin(); it != rtc.active.rend(); ++it) {
+      if (!it->can_input || it->session->closed() || (it->grant_id && !grants.active(it->grant_id, now))) continue;
+      if ((it->grant_id != 0) != (pass == 1)) continue;
+      it->owns_input = true;
+      if (input) input->resetLocks();
+      return;
+    }
   }
 }
 #endif
@@ -161,21 +174,33 @@ int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, boo
     if (input_viewer) {
       auto* previous = input_viewer;
       evict(previous);
-      endStream(previous);
+      endStream(previous, false);
     }
 #ifdef RELAY_RTC
-    else if (rtc.active_owns_input) {
-      closeActiveRtc();
+    else {
+      for (size_t i = 0; i < rtc.active.size(); ++i) {
+        if (rtc.active[i].owns_input) { closeActiveRtc(i); break; }
+      }
     }
 #endif
   }
-  if (plan.closeControl) { evict(control); endControl(); }
+  if (plan.closeControl) { evict(control); endControl(false); }
   ViewerSlot* target = nullptr;
   for (auto& slot : viewers) if (!slot.viewer) { target = &slot; break; }
-  if (!target) return -1;
+  if (!target) {
+#ifdef RELAY_RTC
+    assignRtcInput();
+#endif
+    return -1;
+  }
   const SubscriberRole role = socket == Socket::watch ? SubscriberRole::watch : SubscriberRole::controller;
   auto sub = hub.attach(role, ++nextGeneration, clipboardNotices);
-  if (!sub) return -1;
+  if (!sub) {
+#ifdef RELAY_RTC
+    assignRtcInput();
+#endif
+    return -1;
+  }
 #ifdef __linux__
   configureStreamSocket(wsi);
 #endif
@@ -190,7 +215,7 @@ int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, boo
 
 void Server::release() { if (input) input->releaseAll(); }
 
-void Server::endStream(lws* wsi) {
+void Server::endStream(lws* wsi, bool handoff) {
   auto* slot = slotFor(wsi);
   if (!slot) return;
   if (input_viewer == wsi) { release(); input->cancel(); input_viewer = nullptr; }
@@ -200,17 +225,27 @@ void Server::endStream(lws* wsi) {
   }
   slot->viewer = nullptr;
   slot->width = slot->height = 0;
+#ifdef RELAY_RTC
+  if (handoff) assignRtcInput();
+#else
+  (void)handoff;
+#endif
 }
 
-void Server::endControl() {
+void Server::endControl(bool handoff) {
   if (control) { release(); input->cancel(); }
   control_received.clear(); replies.clear(); control_ready = false; control_generation = 0; control = nullptr;
+#ifdef RELAY_RTC
+  if (handoff) assignRtcInput();
+#else
+  (void)handoff;
+#endif
 }
 
 void Server::endRtc() {
 #ifdef RELAY_RTC
   abortPendingRtc(false);
-  closeActiveRtc();
+  while (!rtc.active.empty()) closeActiveRtc(rtc.active.size() - 1);
 #endif
 }
 
@@ -232,12 +267,20 @@ void Server::expireGrants() {
     endStream(slot.viewer);
   }
 #ifdef RELAY_RTC
-  if (rtc.hasOffer() && rtc.pending_grant_id && !grants.active(rtc.pending_grant_id, now)) {
+  if (rtc.hasOffer() && rtc.offer.grant_id && !grants.active(rtc.offer.grant_id, now)) {
     abortPendingRtc(true, LWS_CLOSE_STATUS_POLICY_VIOLATION, "grant ended");
   }
-  if (rtc.active && rtc.active_grant_id && !grants.active(rtc.active_grant_id, now)) {
-    closeActiveRtc();
+  for (size_t i = rtc.active.size(); i > 0; --i) {
+    if (rtc.active[i - 1].grant_id && !grants.active(rtc.active[i - 1].grant_id, now)) closeActiveRtc(i - 1);
   }
+  const uint64_t now_us = nowUs();
+  for (const auto& active : rtc.active) {
+    unsigned window = 1;
+    uint64_t deadline = 0;
+    uint32_t lowat = 0;
+    hub.updateFlow(active.sub, now_us, std::nullopt, window, deadline, lowat);
+  }
+  assignRtcInput();
 #endif
 }
 void Server::evict(lws* wsi, uint16_t code, const char* reason) {
@@ -431,15 +474,15 @@ std::string httpBearer(lws* wsi) {
   const auto auth = header(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
   return auth.rfind("Bearer ", 0) == 0 ? auth.substr(7) : std::string{};
 }
-int responseHeaders(lws* wsi, unsigned status, const char* mime, size_t length) {
+int responseHeaders(lws* wsi, unsigned status, const char* mime, size_t length, uint64_t rtcSessionId = 0) {
   unsigned char buffer[LWS_PRE+512];
   unsigned char* start = buffer+LWS_PRE;
   unsigned char* next = start;
   unsigned char* end = buffer+sizeof(buffer);
-  const bool sdp = !std::strcmp(mime, "application/sdp");
+  const std::string location = rtcSessionId ? "/rtc/sessions/" + std::to_string(rtcSessionId) : std::string{};
   if (lws_add_http_common_headers(wsi, status, mime, length, &next, end) ||
-      (sdp && lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>("location:"),
-                                          reinterpret_cast<const unsigned char*>("/rtc/session"), 12, &next, end)) ||
+      (!location.empty() && lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>("location:"),
+                                          reinterpret_cast<const unsigned char*>(location.data()), location.size(), &next, end)) ||
       lws_add_http_header_by_name(wsi, reinterpret_cast<const unsigned char*>("cache-control:"),
                                   reinterpret_cast<const unsigned char*>("no-store"), 8, &next, end) ||
       lws_add_http_header_by_token(wsi, WSI_TOKEN_CONNECTION,
@@ -517,10 +560,10 @@ int rtcOfferStart(lws* wsi, HttpResponse* response, Server* s) {
   const bool complete = offer.size() == response->upload_expected;
   delete response->upload; response->upload = nullptr; response->rtc_offer = false;
   if (!complete) {
-    if (s->rtc.offer_client == wsi) s->abortPendingRtc(false);
+    if (s->rtc.offer.client == wsi) s->abortPendingRtc(false);
     return -1;
   }
-  if (s->rtc.offer_stage != Server::RtcOfferStage::receiving_body || s->rtc.offer_client != wsi) {
+  if (s->rtc.offer.stage != Server::RtcOfferStage::receiving_body || s->rtc.offer.client != wsi) {
     return errorResponse(wsi, response, HTTP_STATUS_SERVICE_UNAVAILABLE, "rtc_busy");
   }
   if (response->grant_id && !s->grants.active(response->grant_id, Grants::Clock::now())) {
@@ -530,20 +573,18 @@ int rtcOfferStart(lws* wsi, HttpResponse* response, Server* s) {
   const RtcAdmission admission = s->planRtcAdmission(response->grant_id);
   if (!admission.allowed) {
     s->abortPendingRtc(false);
-    return errorResponse(wsi, response,
-                         admission.replace_denied ? HTTP_STATUS_CONFLICT : HTTP_STATUS_SERVICE_UNAVAILABLE,
-                         admission.replace_denied ? "busy" : "viewer_limit");
+    return errorResponse(wsi, response, HTTP_STATUS_SERVICE_UNAVAILABLE, "viewer_limit");
   }
-  const bool can_input = response->socket != Socket::watch && !s->holdsInput();
+  const bool can_input = response->socket != Socket::watch;
   RtcCallbacks cb;
   cb.wake = [wake = s->wake] { wake->cancel(); };
   cb.request_keyframe = [s] { s->hub.requestKeyframe(); };
   cb.profile_level_id = [s] { return s->hub.profileLevelId(); };
-  auto session = std::make_shared<RtcSession>(s->config.ice_servers, can_input, std::move(cb));
-  s->rtc.pending = session;
-  s->rtc.offer_stage = Server::RtcOfferStage::gathering;
-  s->rtc.pending_can_input = can_input;
-  s->rtc.pending_grant_id = response->grant_id;
+  auto session = std::make_shared<RtcSession>(s->config.ice_servers, can_input, response->grant_id == 0, std::move(cb));
+  s->rtc.offer.session = session;
+  s->rtc.offer.stage = Server::RtcOfferStage::gathering;
+  s->rtc.offer.can_input = can_input;
+  s->rtc.offer.grant_id = response->grant_id;
   session->startOffer(std::move(offer));
   lws_set_timer_usecs(wsi, 5000000);
   return 0;
@@ -569,7 +610,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
     case LWS_CALLBACK_HTTP: {
       const std::string path(static_cast<const char*>(in), len);
       auto* response = static_cast<HttpResponse*>(user);
-      if (response) { response->input_reply = false; response->input_headers = false; response->reply_status = 0; response->rtc_offer = false; }
+      if (response) { response->input_reply = false; response->input_headers = false; response->reply_status = 0; response->rtc_offer = false; response->rtc_session_id = 0; }
       if (path == "/input") {
         if (!response) return -1;
         if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) <= 0) {
@@ -617,18 +658,16 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         }
         const RtcAdmission admission = s->planRtcAdmission(response->grant_id);
         if (!admission.allowed) {
-          return errorResponse(wsi, response,
-                               admission.replace_denied ? HTTP_STATUS_CONFLICT : HTTP_STATUS_SERVICE_UNAVAILABLE,
-                               admission.replace_denied ? "busy" : "viewer_limit");
+          return errorResponse(wsi, response, HTTP_STATUS_SERVICE_UNAVAILABLE, "viewer_limit");
         }
         uint64_t length = 0;
         if (!unsignedNumber(header(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH), length) || !length || length > 65536) {
           return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_offer");
         }
-        s->rtc.offer_stage = Server::RtcOfferStage::receiving_body;
-        s->rtc.offer_client = wsi;
-        s->rtc.pending_grant_id = response->grant_id;
-        s->rtc.pending_can_input = false;
+        s->rtc.offer.stage = Server::RtcOfferStage::receiving_body;
+        s->rtc.offer.client = wsi;
+        s->rtc.offer.grant_id = response->grant_id;
+        s->rtc.offer.can_input = false;
         lws_set_timer_usecs(wsi, 5000000);
         response->socket = requested_socket;
         response->upload = new std::string();
@@ -637,7 +676,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         response->rtc_offer = true;
         return 0;
       }
-      if (path == "/rtc/session") {
+      if (path == "/rtc/session" || path.rfind("/rtc/sessions/", 0) == 0) {
         if (!response) return -1;
         if (lws_hdr_total_length(wsi, WSI_TOKEN_DELETE_URI) <= 0) {
           return errorResponse(wsi, response, HTTP_STATUS_METHOD_NOT_ALLOWED, "method_not_allowed");
@@ -650,11 +689,24 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
           if (!grant) return errorResponse(wsi, response, HTTP_STATUS_UNAUTHORIZED, "unauthorized");
           caller_grant_id = grant->id;
         }
-        if (!s->rtc.active) return errorResponse(wsi, response, HTTP_STATUS_NOT_FOUND, "not_found");
-        if (!rtcSessionAuthorized(caller_is_owner, caller_grant_id, s->rtc.active_grant_id)) {
+        uint64_t session_id = 0;
+        if (path != "/rtc/session" && (!unsignedNumber(path.substr(14), session_id) || !session_id)) {
+          return errorResponse(wsi, response, HTTP_STATUS_NOT_FOUND, "not_found");
+        }
+        size_t index = s->rtc.active.size();
+        for (size_t i = s->rtc.active.size(); i > 0; --i) {
+          const auto& active = s->rtc.active[i - 1];
+          if (session_id ? active.session_id == session_id : active.grant_id == caller_grant_id) {
+            index = i - 1;
+            break;
+          }
+        }
+        if (index == s->rtc.active.size()) return errorResponse(wsi, response, HTTP_STATUS_NOT_FOUND, "not_found");
+        if (!rtcSessionAuthorized(caller_is_owner, caller_grant_id, s->rtc.active[index].grant_id)) {
           return errorResponse(wsi, response, HTTP_STATUS_FORBIDDEN, "forbidden");
         }
-        s->closeActiveRtc();
+        s->closeActiveRtc(index);
+        s->assignRtcInput();
         return jsonResponse(wsi, response, HTTP_STATUS_OK, "{\"ended\":true}");
       }
 #endif
@@ -800,7 +852,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       if (response->image) {
         if (!response->image_headers) {
           response->image_headers = true;
-          return responseHeaders(wsi, response->image_status, response->image_type, response->image->size());
+          return responseHeaders(wsi, response->image_status, response->image_type, response->image->size(), response->rtc_session_id);
         }
         unsigned char chunk[LWS_PRE + 16384];
         const size_t count = std::min<size_t>(16384, response->image->size() - response->offset);
@@ -843,7 +895,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       auto* response = static_cast<HttpResponse*>(user);
       closeScreenshot(s, wsi, response); s->forgetInput(wsi); s->clipboard.forget(wsi);
 #ifdef RELAY_RTC
-      if (s->rtc.offer_client == wsi) s->abortPendingRtc(false);
+      if (s->rtc.offer.client == wsi) s->abortPendingRtc(false);
 #endif
       if (response) { delete response->upload; response->upload = nullptr; }
       return 0;
@@ -936,30 +988,28 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       }
       if (s->control) lws_callback_on_writable(s->control);
 #ifdef RELAY_RTC
-      if (s->rtc.offer_stage == Server::RtcOfferStage::gathering && s->rtc.pending) {
+      if (s->rtc.offer.stage == Server::RtcOfferStage::gathering && s->rtc.offer.session) {
         std::string answer, error;
-        if (s->rtc.pending->takeAnswer(answer, error)) {
-          auto finished = std::move(s->rtc.pending);
-          lws* client = s->rtc.offer_client;
-          const bool offer_can_input = s->rtc.pending_can_input;
-          const uint64_t offer_grant_id = s->rtc.pending_grant_id;
-          s->rtc.offer_stage = Server::RtcOfferStage::none;
-          s->rtc.offer_client = nullptr;
-          s->rtc.pending_can_input = false;
-          s->rtc.pending_grant_id = 0;
+        if (s->rtc.offer.session->takeAnswer(answer, error)) {
+          auto finished = std::move(s->rtc.offer.session);
+          lws* client = s->rtc.offer.client;
+          const bool offer_can_input = s->rtc.offer.can_input;
+          const uint64_t offer_grant_id = s->rtc.offer.grant_id;
+          s->rtc.offer.stage = Server::RtcOfferStage::none;
+          s->rtc.offer.client = nullptr;
+          s->rtc.offer.can_input = false;
+          s->rtc.offer.grant_id = 0;
           auto* response = client ? static_cast<HttpResponse*>(lws_wsi_user(client)) : nullptr;
           const bool grant_expired = offer_grant_id != 0 && !s->grants.active(offer_grant_id, Grants::Clock::now());
           const RtcAdmission admission = s->planRtcAdmission(offer_grant_id);
-          const bool generation_exhausted = s->nextGeneration == UINT32_MAX;
+          const bool generation_exhausted = s->nextGeneration == UINT32_MAX || s->rtc.next_session_id == UINT64_MAX;
           if (!error.empty() || grant_expired || !admission.allowed || generation_exhausted || !client || !response) {
             finished->close();
             if (client && response) {
               const unsigned status = grant_expired ? HTTP_STATUS_UNAUTHORIZED
-                                    : admission.replace_denied ? HTTP_STATUS_CONFLICT
                                     : (!admission.allowed || generation_exhausted) ? HTTP_STATUS_SERVICE_UNAVAILABLE
                                     : HTTP_STATUS_BAD_REQUEST;
               const std::string code = grant_expired ? "unauthorized"
-                                     : admission.replace_denied ? "busy"
                                      : (!admission.allowed || generation_exhausted) ? "viewer_limit"
                                      : (error.empty() ? "rtc_failed" : error);
               const std::string body = "{\"error\":" + jsonString(code) + "}";
@@ -978,12 +1028,18 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
             response->image_headers = false; response->offset = 0;
             lws_callback_on_writable(client);
           } else {
-            s->closeActiveRtc();
             std::weak_ptr<RtcSession> weak_rtc = finished;
-            auto sub = s->hub.attach(SubscriberRole::rtc, ++s->nextGeneration, false,
-                [weak_rtc](const std::shared_ptr<const EncodedFrame>& frame) {
-                  if (auto locked = weak_rtc.lock()) locked->pushFrame(frame);
-                });
+            StreamHub::SubscriberSinks sinks;
+            sinks.frame = [weak_rtc](const std::shared_ptr<const EncodedFrame>& frame, uint32_t generation, uint32_t sequence) {
+              if (auto locked = weak_rtc.lock()) locked->pushFrame(frame, generation, sequence);
+            };
+            sinks.cursor = [weak_rtc](uint32_t generation, const CursorImage& cursor) {
+              if (auto locked = weak_rtc.lock()) locked->pushCursor(generation, cursor);
+            };
+            sinks.clipboard = [weak_rtc](uint32_t generation) {
+              if (auto locked = weak_rtc.lock()) locked->pushClipboardNotice(generation);
+            };
+            auto sub = s->hub.attach(SubscriberRole::rtc, ++s->nextGeneration, offer_grant_id == 0, std::move(sinks));
             if (!sub) {
               finished->close();
               const std::string body = "{\"error\":\"capture_unavailable\"}";
@@ -993,11 +1049,21 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
               response->image_headers = false; response->offset = 0;
               lws_callback_on_writable(client);
             } else {
-              s->rtc.active = std::move(finished);
-              s->rtc.active_subscriber_id = sub->id;
-              s->rtc.active_grant_id = offer_grant_id;
-              s->rtc.active_owns_input = offer_can_input && !s->input_viewer && !s->control;
-              if (s->rtc.active_owns_input) s->input->resetLocks();
+              if (admission.replace) {
+                auto replace = std::find_if(s->rtc.active.begin(), s->rtc.active.end(),
+                    [offer_grant_id](const Server::ActiveRtcSession& active) {
+                      return !offer_grant_id || active.grant_id == offer_grant_id;
+                    });
+                if (replace != s->rtc.active.end()) s->closeActiveRtc(size_t(replace - s->rtc.active.begin()));
+                else for (auto& slot : s->viewers) {
+                  if (slot.viewer) { auto* old = slot.viewer; s->evict(old); s->endStream(old, false); break; }
+                }
+              }
+              const uint64_t session_id = ++s->rtc.next_session_id;
+              s->rtc.active.push_back({session_id, std::move(finished), sub, sub->id, offer_grant_id,
+                                       offer_can_input, false, offer_grant_id == 0});
+              s->assignRtcInput();
+              response->rtc_session_id = session_id;
               response->image = new std::vector<uint8_t>(answer.begin(), answer.end());
               response->image_status = 201;
               response->image_type = "application/sdp";
@@ -1007,19 +1073,29 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
           }
         }
       }
-      if (s->rtc.active) {
-        if ((s->rtc.active_grant_id && !s->grants.active(s->rtc.active_grant_id, Grants::Clock::now())) ||
-            s->rtc.active->closed()) {
-          s->closeActiveRtc();
-        } else {
-          for (const auto& record : s->rtc.active->takeInput()) {
-            if (s->rtc.active_owns_input && !s->input_viewer && !s->control &&
-                s->input && s->input->pending() < max_queued_events) {
-              s->input->apply(inputEvent(record.data()));
-            }
+      for (size_t i = s->rtc.active.size(); i > 0; --i) {
+        auto& active = s->rtc.active[i - 1];
+        if ((active.grant_id && !s->grants.active(active.grant_id, Grants::Clock::now())) || active.session->closed()) {
+          s->closeActiveRtc(i - 1);
+          continue;
+        }
+        for (const auto& ack : active.session->takeAcks()) {
+          const uint64_t now = nowUs();
+          if (s->hub.acknowledge(active.sub, ack.generation, ack.sequence, now, ack.wait_us)) {
+            unsigned window = 1;
+            uint64_t deadline = 0;
+            uint32_t lowat = 0;
+            s->hub.updateFlow(active.sub, now, std::nullopt, window, deadline, lowat);
+          }
+        }
+        for (const auto& record : active.session->takeInput()) {
+          if (active.owns_input && !s->input_viewer && !s->control &&
+              s->input && s->input->pending() < max_queued_events) {
+            s->input->apply(inputEvent(record.data()));
           }
         }
       }
+      s->assignRtcInput();
 #endif
       for (const auto& reply : s->readyInputs()) {
         auto* response = reply->wsi ? static_cast<HttpResponse*>(lws_wsi_user(reply->wsi)) : nullptr;
@@ -1030,11 +1106,10 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         response->input_reply = true; response->input_headers = false;
         lws_callback_on_writable(reply->wsi);
       }
-      if (s->clipboard_changed.exchange(false) && s->input_viewer) {
-        auto* slot = s->slotFor(s->input_viewer);
-        if (slot && slot->sub && slot->sub->clipboard_notices) {
-          slot->sub->clipboard_pending = true;
-          lws_callback_on_writable(slot->viewer);
+      if (s->clipboard_changed.exchange(false)) {
+        s->hub.notifyClipboard();
+        for (const auto& slot : s->viewers) if (slot.viewer && slot.sub && slot.sub->clipboard_notices) {
+          lws_callback_on_writable(slot.viewer);
         }
       }
       for (auto& reply : s->clipboard.take()) {
@@ -1066,7 +1141,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       if (s->closing.erase(wsi)) return -1;
       if (s->screenshot_client == wsi) { closeScreenshot(s, wsi, static_cast<HttpResponse*>(user)); return -1; }
 #ifdef RELAY_RTC
-      if (s->rtc.offer_client == wsi) {
+      if (s->rtc.offer.client == wsi) {
         s->abortPendingRtc(false);
         return -1;
       }
@@ -1084,6 +1159,9 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       s->closing.erase(wsi);
       s->endStream(wsi);
       if (s->control == wsi) s->endControl();
+#ifdef RELAY_RTC
+      s->assignRtcInput();
+#endif
       return 0;
     default: return 0;
   }

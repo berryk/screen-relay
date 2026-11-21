@@ -2,9 +2,11 @@
 #include "server/clipboard.hpp"
 #include "server/config.hpp"
 #include "server/metrics.hpp"
+#include "server/rtc.hpp"
 #include "server/wire.hpp"
 #include <libwebsockets.h>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -407,19 +409,43 @@ int main() {
     assert(!rtcSessionAuthorized(false, 7, 8));
     assert(!rtcSessionAuthorized(false, 0, 0));
 
-    const auto grantLimit = max_viewers - 1;
-    assert(rtcAdmission(0, 0, false, 0, 7).allowed);
-    assert(rtcAdmission(grantLimit - 1, grantLimit - 1, false, 0, 7).allowed);
-    const auto delayed_denied = rtcAdmission(grantLimit, grantLimit, false, 0, 7);
-    assert(!delayed_denied.allowed && !delayed_denied.replace_denied);
-    assert(rtcAdmission(grantLimit, grantLimit, false, 0, 0).allowed);
-    assert(!rtcAdmission(max_viewers, grantLimit, false, 0, 0).allowed);
-    assert(rtcAdmission(grantLimit - 1, grantLimit - 1, true, 7, 7).allowed);
-    assert(rtcAdmission(grantLimit - 1, grantLimit - 1, true, 7, 0).allowed);
-    const auto other_grant_denied = rtcAdmission(0, 0, true, 7, 8);
-    assert(!other_grant_denied.allowed && other_grant_denied.replace_denied);
-    const auto owner_session_denied = rtcAdmission(0, 0, true, 0, 7);
-    assert(!owner_session_denied.allowed && owner_session_denied.replace_denied);
+    assert(rtcAdmission(0, 0, 0, 0, 7, false).allowed);
+    assert(rtcAdmission(2, 1, 1, 1, 7, false).allowed);
+    assert(!rtcAdmission(2, 2, 1, 1, 7, false).allowed);
+    assert(!rtcAdmission(2, 1, 2, 1, 7, false).allowed);
+    assert(rtcAdmission(2, 2, 1, 1, 0, false).allowed);
+    const auto takeover = rtcAdmission(2, 1, 2, 1, 0, false);
+    assert(takeover.allowed && takeover.replace);
+    const auto grant_replacement = rtcAdmission(2, 2, 1, 1, 7, true);
+    assert(grant_replacement.allowed && grant_replacement.replace);
+    assert(!rtcAdmission(3, 1, 2, 1, 0, false).allowed);
+    assert(!connectionPlan(Socket::take, 1, true, false, 0, true, false).open);
+
   }
+#ifndef RELAY_RTC
+  {
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool woke = false;
+    RtcCallbacks callbacks;
+    callbacks.wake = [&] {
+      std::lock_guard<std::mutex> lock(mutex);
+      woke = true;
+      ready.notify_one();
+    };
+    RtcSession session({}, true, false, std::move(callbacks));
+    assert(session.state() == RtcState::idle && !session.closed());
+    session.startOffer("offer");
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      assert(ready.wait_for(lock, std::chrono::seconds(2), [&] { return woke; }));
+    }
+    std::string answer, error;
+    assert(session.takeAnswer(answer, error) && answer.empty() && error == "rtc_disabled");
+    assert(session.closed() && !session.canSendInput() && !session.canReceiveClipboard());
+    assert(session.takeInput().empty() && session.takeAcks().empty());
+    session.close();
+  }
+#endif
   return 0;
 }

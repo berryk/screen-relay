@@ -25,10 +25,16 @@ struct RtcCallbacks {
   std::function<std::string()> profile_level_id;
 };
 
+struct RtcAck {
+  uint32_t generation = 0;
+  uint32_t sequence = 0;
+  uint32_t wait_us = 0;
+};
+
 /** One opt-in WebRTC viewer sharing the engine's StreamHub encoder with STUN/TURN support. */
 class RtcSession {
  public:
-  RtcSession(std::vector<IceServer> ice_servers, bool can_send_input, RtcCallbacks callbacks);
+  RtcSession(std::vector<IceServer> ice_servers, bool can_send_input, bool can_receive_clipboard, RtcCallbacks callbacks);
   ~RtcSession();
   RtcSession(const RtcSession&) = delete;
   RtcSession& operator=(const RtcSession&) = delete;
@@ -38,13 +44,17 @@ class RtcSession {
   /** Returns true once gathering finishes, populating either answer_sdp or error. */
   bool takeAnswer(std::string& answer_sdp, std::string& error);
   /** Sends a shared Annex B frame once the H.264 track is open, starting on a keyframe. */
-  void pushFrame(const std::shared_ptr<const EncodedFrame>& frame);
+  void pushFrame(const std::shared_ptr<const EncodedFrame>& frame, uint32_t generation, uint32_t sequence);
+  void pushCursor(uint32_t generation, const CursorImage& cursor);
+  void pushClipboardNotice(uint32_t generation);
+  std::deque<RtcAck> takeAcks();
   /** Drains 16-byte input records received on the input data channel. */
   std::deque<std::array<uint8_t, 16>> takeInput();
   /** Transitions to closed and tears down the PeerConnection cleanly. */
   void close();
   RtcState state() const;
   bool canSendInput() const;
+  bool canReceiveClipboard() const;
   bool closed() const;
 
  private:

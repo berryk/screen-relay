@@ -29,7 +29,7 @@ struct HttpResponse {
   std::string* upload;
   size_t offset;
   Socket socket;
-  uint64_t upload_expected, grant_id;
+  uint64_t upload_expected, grant_id, rtc_session_id;
   bool image_headers, clipboard, input_reply, input_headers, closing, rtc_offer;
   unsigned reply_status, image_status;
   const char* image_type;
@@ -87,20 +87,28 @@ struct Server {
 #ifdef RELAY_RTC
   /** Explicit stage of an in-flight POST /rtc offer before promotion to an active session. */
   enum class RtcOfferStage : uint8_t { none, receiving_body, gathering };
-  /** Explicit WebRTC active-session and pending-offer state owned by Server. */
+  struct ActiveRtcSession {
+    uint64_t session_id = 0;
+    std::shared_ptr<RtcSession> session;
+    std::shared_ptr<StreamHub::Subscriber> sub;
+    uint64_t subscriber_id = 0;
+    uint64_t grant_id = 0;
+    bool can_input = false;
+    bool owns_input = false;
+    bool can_receive_clipboard = false;
+  };
+  struct PendingRtcOffer {
+    RtcOfferStage stage = RtcOfferStage::none;
+    lws* client = nullptr;
+    std::shared_ptr<RtcSession> session;
+    uint64_t grant_id = 0;
+    bool can_input = false;
+  };
   struct RtcSlot {
-    std::shared_ptr<RtcSession> active;
-    uint64_t active_subscriber_id = 0;
-    uint64_t active_grant_id = 0;
-    bool active_owns_input = false;
-    RtcOfferStage offer_stage = RtcOfferStage::none;
-    lws* offer_client = nullptr;
-    std::shared_ptr<RtcSession> pending;
-    uint64_t pending_grant_id = 0;
-    bool pending_can_input = false;
-
-    bool hasActive() const { return active && !active->closed(); }
-    bool hasOffer() const { return offer_stage != RtcOfferStage::none; }
+    std::vector<ActiveRtcSession> active;
+    PendingRtcOffer offer;
+    uint64_t next_session_id = 0;
+    bool hasOffer() const { return offer.stage != RtcOfferStage::none; }
   };
   RtcSlot rtc;
 #endif
@@ -113,14 +121,15 @@ struct Server {
   RtcAdmission planRtcAdmission(uint64_t callerGrantId) const;
   void abortPendingRtc(bool evictClient, uint16_t code = LWS_CLOSE_STATUS_POLICY_VIOLATION,
                        const char* reason = "grant ended");
-  void closeActiveRtc();
+  void closeActiveRtc(size_t index);
+  void assignRtcInput();
 #endif
   int startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, bool clipboardNotices);
   void updateSlotFlow(ViewerSlot& slot);
   int writeSlot(ViewerSlot& slot);
   void release();
-  void endStream(lws* wsi);
-  void endControl();
+  void endStream(lws* wsi, bool handoff = true);
+  void endControl(bool handoff = true);
   void endRtc();
   void end();
   void expireGrants();

@@ -33,8 +33,62 @@ namespace {
 constexpr uint32_t video_ssrc = 0x52454c59;
 constexpr size_t max_queued_rtc_input = 1024;
 constexpr size_t max_queued_rtc_frames = 4;
+constexpr size_t max_queued_rtc_acks = 256;
+constexpr size_t event_header_size = 20;
+constexpr uint32_t event_magic = 0x4e534c31;
+enum class EventType : uint8_t { frame = 1, ack = 2, cursor = 6, clipboard = 7 };
 constexpr auto rtc_disconnect_grace = std::chrono::seconds(4);
 constexpr auto rtc_overrun_idr_interval = std::chrono::seconds(1);
+
+uint32_t readBigEndian(const std::byte* src, size_t size) {
+  uint32_t value = 0;
+  for (size_t i = 0; i < size; ++i) value = (value << 8) | std::to_integer<uint32_t>(src[i]);
+  return value;
+}
+
+void writeBigEndian(std::byte* dest, uint32_t value, size_t size) {
+  while (size) {
+    dest[--size] = std::byte(value & 0xff);
+    value >>= 8;
+  }
+}
+
+rtc::binary eventMessage(EventType type, uint32_t generation, uint32_t sequence = 0, uint32_t size = 0) {
+  rtc::binary message(event_header_size + size);
+  writeBigEndian(message.data(), event_magic, 4);
+  message[4] = std::byte{1};
+  message[5] = std::byte(type);
+  writeBigEndian(message.data() + 8, generation, 4);
+  writeBigEndian(message.data() + 12, sequence, 4);
+  writeBigEndian(message.data() + 16, size, 4);
+  return message;
+}
+
+std::optional<RtcAck> parseAck(const rtc::binary& message) {
+  if ((message.size() != event_header_size && message.size() != event_header_size + 4) ||
+      readBigEndian(message.data(), 4) != event_magic || message[4] != std::byte{1} ||
+      message[5] != std::byte(EventType::ack) || readBigEndian(message.data() + 6, 2) != 0 ||
+      readBigEndian(message.data() + 16, 4) != message.size() - event_header_size) return std::nullopt;
+  RtcAck ack{readBigEndian(message.data() + 8, 4), readBigEndian(message.data() + 12, 4),
+             message.size() == event_header_size + 4 ? readBigEndian(message.data() + event_header_size, 4) : 0};
+  if (!ack.generation || !ack.sequence) return std::nullopt;
+  return ack;
+}
+
+std::optional<rtc::binary> cursorEvent(uint32_t generation, const CursorImage& cursor) {
+  if (cursor.width > CursorImage::max_extent || cursor.height > CursorImage::max_extent ||
+      cursor.rgba.size() != size_t(cursor.width) * cursor.height * 4 ||
+      (cursor.width && cursor.height ? cursor.xhot >= cursor.width || cursor.yhot >= cursor.height
+                                     : cursor.width || cursor.height || cursor.xhot || cursor.yhot)) return std::nullopt;
+  auto message = eventMessage(EventType::cursor, generation, 0, uint32_t(8 + cursor.rgba.size()));
+  auto* payload = message.data() + event_header_size;
+  writeBigEndian(payload, cursor.width, 2);
+  writeBigEndian(payload + 2, cursor.height, 2);
+  writeBigEndian(payload + 4, cursor.xhot, 2);
+  writeBigEndian(payload + 6, cursor.yhot, 2);
+  if (!cursor.rgba.empty()) std::memcpy(payload + 8, cursor.rgba.data(), cursor.rgba.size());
+  return message;
+}
 
 bool isHexDigit(char c) {
   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -88,6 +142,7 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
   using Clock = std::chrono::steady_clock;
   std::vector<IceServer> ice_servers;
   bool can_send_input = false;
+  bool can_receive_clipboard = false;
   RtcCallbacks callbacks;
   mutable std::mutex mutex;
   std::condition_variable cv;
@@ -103,15 +158,26 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
   std::string answer_sdp;
   std::string error;
   std::deque<std::array<uint8_t, 16>> input;
-  std::deque<std::shared_ptr<const EncodedFrame>> pending_frames;
+  std::deque<RtcAck> ack_queue;
+  struct PendingFrame {
+    std::shared_ptr<const EncodedFrame> frame;
+    uint32_t generation;
+    uint32_t sequence;
+  };
+  std::deque<PendingFrame> pending_frames;
+  std::optional<std::pair<uint32_t, CursorImage>> pending_cursor;
+  std::optional<uint32_t> pending_clipboard_gen;
 #ifdef RELAY_RTC
   std::shared_ptr<rtc::PeerConnection> pc;
   std::shared_ptr<rtc::Track> track;
   std::shared_ptr<rtc::DataChannel> channel;
+  std::shared_ptr<rtc::DataChannel> events_channel;
+  bool events_ready = false;
 #endif
 
-  Impl(std::vector<IceServer> servers, bool allow_input, RtcCallbacks cb)
-      : ice_servers(std::move(servers)), can_send_input(allow_input), callbacks(std::move(cb)) {}
+  Impl(std::vector<IceServer> servers, bool allow_input, bool allow_clipboard, RtcCallbacks cb)
+      : ice_servers(std::move(servers)), can_send_input(allow_input), can_receive_clipboard(allow_clipboard),
+        callbacks(std::move(cb)) {}
 
   void wake() const {
     if (callbacks.wake) callbacks.wake();
@@ -144,7 +210,7 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
 
   void close() {
 #ifdef RELAY_RTC
-    std::shared_ptr<rtc::DataChannel> dc;
+    std::shared_ptr<rtc::DataChannel> dc, events;
     std::shared_ptr<rtc::Track> tr;
     std::shared_ptr<rtc::PeerConnection> peer;
 #endif
@@ -164,12 +230,14 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
       send_cv.notify_all();
 #ifdef RELAY_RTC
       dc = std::move(channel);
+      events = std::move(events_channel);
       tr = std::move(track);
       peer = std::move(pc);
 #endif
     }
 #ifdef RELAY_RTC
     if (dc) dc->close();
+    if (events) events->close();
     if (tr) tr->close();
     if (peer) peer->close();
 #endif
@@ -199,32 +267,95 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
     });
   }
 
-  void sendLoop() {
 #ifdef RELAY_RTC
+  void sendLoop() {
     while (true) {
-      std::shared_ptr<const EncodedFrame> frame;
+      PendingFrame pending{};
+      std::optional<std::pair<uint32_t, CursorImage>> cursor;
+      std::optional<uint32_t> clipboard_gen;
       std::shared_ptr<rtc::Track> tr;
+      std::shared_ptr<rtc::DataChannel> events;
       {
         std::unique_lock<std::mutex> lock(mutex);
         send_cv.wait(lock, [this] {
-          return state == RtcState::closed || state == RtcState::closing || !pending_frames.empty();
+          return state == RtcState::closed || state == RtcState::closing || !pending_frames.empty() ||
+              (events_ready && (pending_cursor || pending_clipboard_gen));
         });
         if (state == RtcState::closed || state == RtcState::closing) return;
-        frame = std::move(pending_frames.front());
-        pending_frames.pop_front();
-        if (state != RtcState::connected || !track) continue;
-        tr = track;
+        if (!pending_frames.empty()) {
+          pending = std::move(pending_frames.front());
+          pending_frames.pop_front();
+          if (state == RtcState::connected) tr = track;
+        }
+        if (events_ready) {
+          events = events_channel;
+          cursor = std::exchange(pending_cursor, std::nullopt);
+          clipboard_gen = std::exchange(pending_clipboard_gen, std::nullopt);
+        }
       }
-      if (!frame || !tr || !tr->isOpen()) continue;
       try {
-        tr->sendFrame(reinterpret_cast<const std::byte*>(frame->annex_b.data()), frame->annex_b.size(),
-                      rtc::FrameInfo(std::chrono::duration<double, std::micro>(double(frame->pts_us))));
+        if (pending.frame && tr && tr->isOpen()) {
+          const auto& frame = *pending.frame;
+          tr->sendFrame(reinterpret_cast<const std::byte*>(frame.annex_b.data()), frame.annex_b.size(),
+                        rtc::FrameInfo(std::chrono::duration<double, std::micro>(double(frame.pts_us))));
+          if (events && events->isOpen()) events->send(eventMessage(EventType::frame, pending.generation, pending.sequence));
+        }
+      } catch (const std::exception& ex) {
+        std::cerr << "RTC send failed: " << ex.what() << '\n';
+      }
+      if (!events || !events->isOpen()) continue;
+      try {
+        if (cursor) {
+          if (auto message = cursorEvent(cursor->first, cursor->second)) events->send(std::move(*message));
+        }
+        if (clipboard_gen) events->send(eventMessage(EventType::clipboard, *clipboard_gen));
       } catch (const std::exception& ex) {
         std::cerr << "RTC send failed: " << ex.what() << '\n';
       }
     }
-#endif
   }
+
+  void acceptEventsChannel(const std::shared_ptr<rtc::DataChannel>& dc, const std::weak_ptr<Impl>& weak) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (state == RtcState::closed || state == RtcState::closing || events_channel) return;
+      events_channel = dc;
+    }
+    dc->onMessage([weak](rtc::message_variant message) {
+      auto self = weak.lock();
+      const auto* bytes = std::get_if<rtc::binary>(&message);
+      if (!self || !bytes) return;
+      const auto ack = parseAck(*bytes);
+      if (!ack) return;
+      {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        if (self->state == RtcState::closed || self->state == RtcState::closing) return;
+        if (self->ack_queue.size() >= max_queued_rtc_acks) self->ack_queue.pop_front();
+        self->ack_queue.push_back(*ack);
+      }
+      self->wake();
+    });
+    auto opened = [weak] {
+      if (auto self = weak.lock()) {
+        {
+          std::lock_guard<std::mutex> lock(self->mutex);
+          if (self->events_ready || self->state == RtcState::closed || self->state == RtcState::closing) return;
+          self->events_ready = true;
+          self->send_cv.notify_one();
+        }
+        if (self->callbacks.request_keyframe) self->callbacks.request_keyframe();
+      }
+    };
+    dc->onOpen(opened);
+    dc->onClosed([weak] {
+      if (auto self = weak.lock()) {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        self->events_ready = false;
+      }
+    });
+    if (dc->isOpen()) opened();
+  }
+#endif
 
   void runOffer(std::string offer_sdp) {
 #ifndef RELAY_RTC
@@ -304,7 +435,13 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
 
       peer->onDataChannel([weak](std::shared_ptr<rtc::DataChannel> dc) {
         auto self = weak.lock();
-        if (!self || !dc || dc->label() != "input" || !self->can_send_input) return;
+        if (!self || !dc) return;
+        const auto label = dc->label();
+        if (label == "events") {
+          self->acceptEventsChannel(dc, weak);
+          return;
+        }
+        if (label != "input" || !self->can_send_input) return;
         {
           std::lock_guard<std::mutex> lock(self->mutex);
           if (self->state == RtcState::closed || self->state == RtcState::closing) return;
@@ -403,9 +540,9 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
 #endif
   }
 
-  void pushFrame(const std::shared_ptr<const EncodedFrame>& frame) {
-    if (!frame) return;
+  void pushFrame(const std::shared_ptr<const EncodedFrame>& frame, uint32_t generation, uint32_t sequence) {
 #ifdef RELAY_RTC
+    if (!frame) return;
     bool request_idr = false;
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -426,14 +563,45 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
       }
       if (enqueue) {
         if (frame->keyframe) awaiting_keyframe = false;
-        pending_frames.push_back(frame);
+        pending_frames.push_back({frame, generation, sequence});
         send_cv.notify_one();
       }
     }
     if (request_idr && callbacks.request_keyframe) callbacks.request_keyframe();
 #else
     (void)frame;
+    (void)generation;
+    (void)sequence;
 #endif
+  }
+
+  void pushCursor(uint32_t generation, const CursorImage& cursor) {
+#ifdef RELAY_RTC
+    std::lock_guard<std::mutex> lock(mutex);
+    if (state == RtcState::closed || state == RtcState::closing) return;
+    pending_cursor.emplace(generation, cursor);
+    send_cv.notify_one();
+#else
+    (void)generation;
+    (void)cursor;
+#endif
+  }
+
+  void pushClipboardNotice(uint32_t generation) {
+#ifdef RELAY_RTC
+    if (!can_receive_clipboard) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (state == RtcState::closed || state == RtcState::closing) return;
+    pending_clipboard_gen = generation;
+    send_cv.notify_one();
+#else
+    (void)generation;
+#endif
+  }
+
+  std::deque<RtcAck> takeAcks() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::exchange(ack_queue, {});
   }
 
   bool takeAnswer(std::string& out_answer, std::string& out_error) {
@@ -459,8 +627,10 @@ struct RtcSession::Impl : public std::enable_shared_from_this<Impl> {
   }
 };
 
-RtcSession::RtcSession(std::vector<IceServer> ice_servers, bool can_send_input, RtcCallbacks callbacks)
-    : impl_(std::make_shared<Impl>(std::move(ice_servers), can_send_input, std::move(callbacks))) {}
+RtcSession::RtcSession(std::vector<IceServer> ice_servers, bool can_send_input, bool can_receive_clipboard,
+                       RtcCallbacks callbacks)
+    : impl_(std::make_shared<Impl>(std::move(ice_servers), can_send_input, can_receive_clipboard,
+                                  std::move(callbacks))) {}
 
 RtcSession::~RtcSession() {
   if (impl_) {
@@ -471,11 +641,17 @@ RtcSession::~RtcSession() {
 
 void RtcSession::startOffer(std::string offer_sdp) { impl_->startOffer(std::move(offer_sdp)); }
 bool RtcSession::takeAnswer(std::string& answer_sdp, std::string& error) { return impl_->takeAnswer(answer_sdp, error); }
-void RtcSession::pushFrame(const std::shared_ptr<const EncodedFrame>& frame) { impl_->pushFrame(frame); }
+void RtcSession::pushFrame(const std::shared_ptr<const EncodedFrame>& frame, uint32_t generation, uint32_t sequence) {
+  impl_->pushFrame(frame, generation, sequence);
+}
+void RtcSession::pushCursor(uint32_t generation, const CursorImage& cursor) { impl_->pushCursor(generation, cursor); }
+void RtcSession::pushClipboardNotice(uint32_t generation) { impl_->pushClipboardNotice(generation); }
+std::deque<RtcAck> RtcSession::takeAcks() { return impl_->takeAcks(); }
 std::deque<std::array<uint8_t, 16>> RtcSession::takeInput() { return impl_->takeInput(); }
 void RtcSession::close() { impl_->close(); }
 RtcState RtcSession::state() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->state; }
 bool RtcSession::canSendInput() const { return impl_->can_send_input && !impl_->isClosed(); }
+bool RtcSession::canReceiveClipboard() const { return impl_->can_receive_clipboard && !impl_->isClosed(); }
 bool RtcSession::closed() const { return impl_->isClosed(); }
 
 }  // namespace relay
