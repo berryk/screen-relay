@@ -167,6 +167,16 @@ function icePort(text: string): boolean {
   return /^[1-9][0-9]{0,4}$/.test(text) && Number(text) <= 65535;
 }
 
+/** Reports whether a TURN or TURNS server URL carries embedded userinfo credentials. */
+export function iceServerHasCredentials(spec: string): boolean {
+  const scheme = ICE_SCHEMES.find((candidate) => spec.startsWith(candidate));
+  if (!scheme || scheme === 'stun:') return false;
+  const authority = spec.slice(scheme.length);
+  const query = authority.indexOf('?');
+  const hostPart = query >= 0 ? authority.slice(0, query) : authority;
+  return hostPart.includes('@');
+}
+
 /** Reports whether a value is a STUN or TURN server URL in the form the engine accepts. */
 export function iceServerSpec(spec: string): boolean {
   if (!spec) return false;

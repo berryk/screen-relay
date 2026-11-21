@@ -36,7 +36,7 @@ screen-relay doctor [--config FILE]
   - `--yes`: when setup is needed, set it up without asking. Without a terminal, `up` never prompts and fails with `missing_input` unless `--yes` is given.
   - `--public HTTPS_URL`: advertises an HTTPS origin without changing the listen address. Expects a TLS proxy unless `--tls-cert` is set. Browser pages must be served from this origin, a loopback page connecting to the same address, or an origin in `--allow-origin`.
   - `--allow-origin ORIGINS`: comma-separated exact origins whose browser pages may also connect: lowercase `https://HOST[:PORT]` for any host, or `http://localhost[:PORT]` and `http://127.0.0.1[:PORT]` for a page served on the machine itself. No wildcards. Creates a token. Env: `SCREEN_RELAY_ALLOW_ORIGIN`.
-  - `--ice-server URL`: add a STUN, TURN, or TURNS server URL for WebRTC viewers; repeat up to 8 times. Env: `SCREEN_RELAY_ICE_SERVERS`, whitespace-separated.
+  - `--ice-server URL`: add a credential-free STUN, TURN, or TURNS server URL for WebRTC viewers; repeat up to 8 times. Set credential-bearing TURN URLs in `server.ice_servers` in `config.yaml` or `SCREEN_RELAY_ICE_SERVERS` (whitespace-separated).
   - `--bind ADDRESS`: listen address. Defaults to `127.0.0.1`, including with `--public`; another address generates a token.
   - Backend setup: [Wayland](wayland.md) and [macOS](macos.md).
 - `down` stops the session and everything it started. On Windows, apps started with `run` keep running. It is safe to repeat. JSON outcome: `stopped` or `unchanged`.

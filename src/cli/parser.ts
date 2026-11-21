@@ -22,7 +22,9 @@ export function unknownToken(kind: string, token: string, choices: string[], com
 
 function valueFor(parameter: Parameter, raw: unknown, command: string, fromEnvironment = false): unknown {
   const value = parameter.type === 'number' ? Number(raw) : raw;
-  if ((parameter.type === 'number' && (String(raw).trim() === '' || !Number.isFinite(value))) || (parameter.acceptedValues && !parameter.acceptedValues.includes(String(value))) || (parameter.validate && !parameter.validate(value))) {
+  const check = parameter.validate ? parameter.validate(value, fromEnvironment) : true;
+  if (check instanceof Failure) throw check;
+  if ((parameter.type === 'number' && (String(raw).trim() === '' || !Number.isFinite(value))) || (parameter.acceptedValues && !parameter.acceptedValues.includes(String(value))) || !check) {
     const target = fromEnvironment ? parameter.environment : parameter.name;
     const detail = parameter.sensitive ? `Invalid ${target}.` : `Invalid ${target}: '${String(raw)}'.`;
     throw usageFailure(`${detail}${parameter.acceptedValues ? ` Expected ${parameter.acceptedValues.join(', ')}.` : ''}`, command);

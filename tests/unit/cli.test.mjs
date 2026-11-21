@@ -63,9 +63,11 @@ test('--encoder and repeated --ice-server take validated values from flags and t
     assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ENCODER: value }), /Invalid SCREEN_RELAY_ENCODER/, value);
   }
 
+  const cliServers = ['stun:stun.example.com', 'turn:turn.example.com:3478?transport=tcp'];
   const servers = ['stun:stun.example.com', 'turn:user:pass@turn.example.com:3478?transport=tcp'];
-  assert.deepEqual(parseCommand(['up', '--ice-server', servers[0], '--ice-server', servers[1]], {})['ice-server'], servers);
+  assert.deepEqual(parseCommand(['up', '--ice-server', cliServers[0], '--ice-server', cliServers[1]], {})['ice-server'], cliServers);
   assert.deepEqual(parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: servers.join(' ') })['ice-server'], servers);
+  assert.throws(() => parseCommand(['up', '--ice-server', 'turn:u:s3cr3t-turn-pass@turn.example.com:3478?transport=tcp'], {}), (error) => /ICE server credentials cannot be passed in --ice-server/.test(error.message) && !error.message.includes('s3cr3t-turn-pass'));
   assert.throws(() => parseCommand(['up', '--ice-server', 'turn:u:s3cr3t-turn-pass@stun.example.com/path'], {}), (error) => /Invalid ice-server/.test(error.message) && !error.message.includes('s3cr3t-turn-pass'));
   assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: 'stun:ok.example.com turn:u:s3cr3t-turn-pass@bad.example.com/path' }), (error) => /Invalid SCREEN_RELAY_ICE_SERVERS/.test(error.message) && !error.message.includes('s3cr3t-turn-pass'));
   const nine = Array.from({ length: 9 }, (_, index) => `stun:h${index}.example.com`);
@@ -74,7 +76,7 @@ test('--encoder and repeated --ice-server take validated values from flags and t
   assert.equal(parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: '' })['ice-server'], undefined);
   assert.equal(parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: '   ' })['ice-server'], undefined);
   const oversized = Array.from({ length: 8 }, (_, index) => `turn:u:${'a'.repeat(2100)}@h${index}.example.com`);
-  assert.throws(() => parseCommand(['up', ...oversized.flatMap((server) => ['--ice-server', server])], {}), /16 KiB limit/);
+  assert.throws(() => parseCommand(['up'], { SCREEN_RELAY_ICE_SERVERS: oversized.join(' ') }), /16 KiB limit/);
 
   const detached = detachedSupervisorSpawn(
     ['up', '-d', '--ice-server', servers[0], `--ice-server=${servers[1]}`, '--port', '8081'],

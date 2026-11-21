@@ -1,5 +1,5 @@
 import { cmdClick, cmdClipboard, cmdInput, cmdKey, cmdMove, cmdScreenshot, cmdScroll, cmdType } from './client.js';
-import { BACKENDS, allowedOrigins, encoderName, iceServerSpec } from './config.js';
+import { BACKENDS, allowedOrigins, encoderName, iceServerHasCredentials, iceServerSpec } from './config.js';
 import { cmdDoctor } from './host/doctor.js';
 import { cmdDown, cmdLogs, cmdRun, cmdStatus, cmdUp, COMPONENTS } from './host/session_commands.js';
 import { cmdInstall } from './host/setup.js';
@@ -22,7 +22,7 @@ export type Parameter = {
   environment?: string;
   deferredDefault?: boolean;
   sensitive?: boolean;
-  validate?: (value: unknown) => boolean;
+  validate?: (value: unknown, fromEnvironment?: boolean) => boolean | Failure;
 };
 export type Subcommand = { name: string; summary: string; examples: { description: string; command: string }[]; resultSchema?: Record<string, unknown> };
 export type RunsOn = 'vm' | 'client' | 'anywhere';
@@ -78,7 +78,14 @@ export const commands: Record<string, Command> = {
       { name: 'encoder', type: 'string', valueHint: '<ENCODER>', summary: 'Encode with auto, x264, or a hardware encoder name', environment: 'SCREEN_RELAY_ENCODER', default: 'auto', deferredDefault: true, validate: (value) => encoderName(String(value)) },
       { name: 'public', type: 'string', valueHint: '<URL>', summary: 'Advertise this HTTPS origin without changing the listen address', environment: 'SCREEN_RELAY_PUBLIC', validate: (value) => /^https:\/\/[^/?#@\\\s]+$/.test(String(value)) },
       { name: 'allow-origin', type: 'string', valueHint: '<ORIGINS>', summary: 'Also accept browser requests from these comma-separated exact origins: HTTPS for any host, or HTTP for localhost and 127.0.0.1', environment: 'SCREEN_RELAY_ALLOW_ORIGIN', validate: allowedOrigins },
-      { name: 'ice-server', type: 'string', valueHint: '<URL>', repeat: 'collect', sensitive: true, summary: 'Add a STUN or TURN server URL for WebRTC viewers; repeat it up to 8 times', environment: 'SCREEN_RELAY_ICE_SERVERS', validate: (value) => iceServerSpec(String(value)) },
+      { name: 'ice-server', type: 'string', valueHint: '<URL>', repeat: 'collect', sensitive: true, summary: 'Add a credential-free STUN or TURN server URL for WebRTC viewers; repeat up to 8 times (set credential-bearing TURN URLs in config.yaml or SCREEN_RELAY_ICE_SERVERS)', environment: 'SCREEN_RELAY_ICE_SERVERS', validate: (value, fromEnvironment) => {
+        const spec = String(value);
+        if (!iceServerSpec(spec)) return false;
+        if (!fromEnvironment && iceServerHasCredentials(spec)) {
+          return new Failure('invalid_input', 'ICE server credentials cannot be passed in --ice-server', 'Set credential-bearing TURN URLs in server.ice_servers in config.yaml or SCREEN_RELAY_ICE_SERVERS instead.');
+        }
+        return true;
+      } },
       { name: 'tls-cert', type: 'string', valueHint: '<FILE>', summary: 'Serve TLS with this certificate', environment: 'SCREEN_RELAY_TLS_CERT' },
       { name: 'tls-key', type: 'string', valueHint: '<FILE>', summary: 'Read the TLS private key', environment: 'SCREEN_RELAY_TLS_KEY' },
       { name: 'bind', type: 'string', valueHint: '<ADDRESS>', summary: 'Listen on this address', environment: 'SCREEN_RELAY_BIND', default: '127.0.0.1', deferredDefault: true },

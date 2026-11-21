@@ -59,6 +59,7 @@ export async function cmdUp(args: Args): Promise<number> {
       : 'display.resolution is ignored with --display; the existing display size is used' }] : [];
   for (const warning of warnings) printWarning(warning.message, args);
   applyTo(args, settings, present);
+  delete process.env.SCREEN_RELAY_ICE_SERVERS;
   const port = Number(args.port ?? 8080);
   const timeout = Number(args.timeout ?? 30);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Failure('invalid_input', 'Port must be between 1 and 65535', 'Run `screen-relay up --help`.');
