@@ -68,13 +68,25 @@ class ScaledCaptureSource final : public CaptureSource {
     last_rects_.clear();
     last_rects_valid_ = false;
 
+    std::vector<DamageRect> src_rects;
+    const bool have_initial_rects = !full && have_initial_frame_ && inner_->changedRects(src_rects);
+
     const uint8_t* scale_src = view.data;
     int scale_stride = view.stride;
+    bool bootstrapped_shadow = false;
     if (!full_view) {
       if (!have_source_shadow_) {
+        if (!have_initial_rects || src_rects.empty()) {
+          src_rects.push_back({view.x, view.y, view.width, view.height});
+        }
         const FrameView full_frame = inner_->capture();
         validateSourceView(full_frame, true);
         copyToShadow(full_frame);
+        std::vector<DamageRect> extra_rects;
+        if (inner_->changedRects(extra_rects)) {
+          src_rects.insert(src_rects.end(), extra_rects.begin(), extra_rects.end());
+        }
+        bootstrapped_shadow = true;
       } else {
         copySubRectToShadow(view);
       }
@@ -91,8 +103,15 @@ class ScaledCaptureSource final : public CaptureSource {
       return {dst_buffer_.data(), dst_width_ * 4, dst_width_, dst_height_, format_, 0, 0};
     }
 
-    std::vector<DamageRect> src_rects;
-    if (inner_->changedRects(src_rects) && !src_rects.empty()) {
+    if (bootstrapped_shadow) {
+      scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4,
+                    {0, 0, dst_width_, dst_height_});
+      for (const auto& rect : src_rects) {
+        const DamageRect mapped = mapDamageRect(rect, src_width_, src_height_, dst_width_, dst_height_);
+        if (mapped.width > 0 && mapped.height > 0) last_rects_.push_back(mapped);
+      }
+      last_rects_valid_ = !last_rects_.empty();
+    } else if (have_initial_rects && !src_rects.empty()) {
       for (const auto& rect : src_rects) {
         const DamageRect mapped = mapDamageRect(rect, src_width_, src_height_, dst_width_, dst_height_);
         if (mapped.width > 0 && mapped.height > 0) {

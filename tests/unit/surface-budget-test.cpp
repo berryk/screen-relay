@@ -61,7 +61,17 @@ class SyntheticSource final : public relay::CaptureSource {
     return cur;
   }
 
+  void setCaptureOverrideDamage(relay::DamageRect rect) {
+    override_damage_ = rect;
+    has_override_damage_ = true;
+  }
+
   relay::FrameView capture() override {
+    if (has_override_damage_) {
+      sub_rect_ = override_damage_;
+      has_sub_rect_ = true;
+      has_override_damage_ = false;
+    }
     return {pixels_.data(), width_ * 4, width_, height_, format_, 0, 0};
   }
 
@@ -89,6 +99,8 @@ class SyntheticSource final : public relay::CaptureSource {
   std::vector<uint8_t> sub_pixels_;
   relay::DamageRect sub_rect_{};
   bool has_sub_rect_ = false;
+  relay::DamageRect override_damage_{};
+  bool has_override_damage_ = false;
 };
 }  // namespace
 
@@ -185,11 +197,15 @@ int main() {
     require(initial.data[0] == 40 && initial.data[1] == 120 && initial.data[2] == 200, "initial solid color mismatch");
 
     raw_ptr->paintRect(1024, 576, 1024, 576, 210, 50, 30);
+    raw_ptr->setCaptureOverrideDamage({3072, 1728, 512, 288});
     const auto updated = fitted->captureChanged(false);
     std::vector<DamageRect> rects;
-    require(fitted->changedRects(rects) && !rects.empty(), "scaled sub-rect damage missing");
+    require(fitted->changedRects(rects) && rects.size() == 2, "scaled sub-rect bootstrap must preserve both original and new damage");
     const int cx = int(int64_t(1536) * dims.first / 5120);
     const int cy = int(int64_t(864) * dims.second / 2880);
+    const bool covers_original = (rects[0].x <= cx && cx < rects[0].x + rects[0].width &&
+                                  rects[0].y <= cy && cy < rects[0].y + rects[0].height);
+    require(covers_original, "original sub-rect damage was lost during shadow bootstrap");
     const uint8_t* px = updated.data + size_t(cy) * size_t(updated.stride) + size_t(cx) * 4u;
     require(px[0] == 210 && px[1] == 50 && px[2] == 30, "scaled sub-rect center pixel mismatch");
     require(updated.data[0] == 40 && updated.data[1] == 120 && updated.data[2] == 200, "untouched pixel corrupted");
