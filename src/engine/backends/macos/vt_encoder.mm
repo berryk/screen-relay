@@ -510,11 +510,31 @@ class VideoToolboxEncoder final : public VideoEncoder {
     if (cf_seconds) CFRelease(cf_seconds);
   }
 
-  /** Creates the compression session, retrying without low-latency rate control when this Mac rejects it. */
+  /** Creates the hardware compression session configured for real-time limited-range BT.709 H.264 output. */
   bool createSession(std::string& error) {
     destroySession();
-    bool low_latency = openSession(true, error);
-    if (!low_latency && !openSession(false, error)) return false;
+    CFMutableDictionaryRef enc_spec = CFDictionaryCreateMutable(nullptr, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+
+    CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(nullptr, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    int32_t pix_fmt = kCVPixelFormatType_32BGRA;
+    CFNumberRef cf_pix = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pix_fmt);
+    CFDictionaryRef io_props = CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(src_attrs, kCVPixelBufferPixelFormatTypeKey, cf_pix);
+    CFDictionarySetValue(src_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
+    CFRelease(io_props);
+    CFRelease(cf_pix);
+
+    const OSStatus created = VTCompressionSessionCreate(nullptr, config_.width, config_.height, kCMVideoCodecType_H264,
+                                                        enc_spec, src_attrs, nullptr, outputCallback, this, &session_);
+    CFRelease(src_attrs);
+    CFRelease(enc_spec);
+    if (created != noErr || !session_) {
+      session_ = nullptr;
+      error = "VTCompressionSessionCreate failed (" + std::to_string(int(created)) + ")";
+      return false;
+    }
 
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
@@ -544,36 +564,6 @@ class VideoToolboxEncoder final : public VideoEncoder {
     if (prepared != noErr) {
       destroySession();
       error = "VTCompressionSessionPrepareToEncodeFrames failed (" + std::to_string(int(prepared)) + ")";
-      return false;
-    }
-    return true;
-  }
-
-  /** Creates one VTCompressionSession, optionally asking for low-latency rate control. */
-  bool openSession(bool low_latency_rate_control, std::string& error) {
-    CFMutableDictionaryRef enc_spec = CFDictionaryCreateMutable(nullptr, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
-    CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
-    if (low_latency_rate_control) {
-      CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableLowLatencyRateControl, kCFBooleanTrue);
-    }
-
-    CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(nullptr, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int32_t pix_fmt = kCVPixelFormatType_32BGRA;
-    CFNumberRef cf_pix = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pix_fmt);
-    CFDictionaryRef io_props = CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(src_attrs, kCVPixelBufferPixelFormatTypeKey, cf_pix);
-    CFDictionarySetValue(src_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
-    CFRelease(io_props);
-    CFRelease(cf_pix);
-
-    const OSStatus created = VTCompressionSessionCreate(nullptr, config_.width, config_.height, kCMVideoCodecType_H264,
-                                                        enc_spec, src_attrs, nullptr, outputCallback, this, &session_);
-    CFRelease(src_attrs);
-    CFRelease(enc_spec);
-    if (created != noErr || !session_) {
-      session_ = nullptr;
-      error = "VTCompressionSessionCreate failed (" + std::to_string(int(created)) + ")";
       return false;
     }
     return true;
