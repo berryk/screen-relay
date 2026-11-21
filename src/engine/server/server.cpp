@@ -536,10 +536,12 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
           for (int index = 0; lws_hdr_fragment_length(wsi, WSI_TOKEN_HTTP_URI_ARGS, index) > 0; ++index) {
             // A fragment that does not fit is invalid, not the end of the query.
             const int length = lws_hdr_copy_fragment(wsi, arg, sizeof(arg), WSI_TOKEN_HTTP_URI_ARGS, index);
-            if (length < 0) return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_ttl");
+            if (length < 0) return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_query");
             const std::string pair(arg, size_t(length));
-            if (pair.rfind("connections=", 0) == 0 && !connections_seen) {
-              if (pair != "connections=1") return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_connections");
+            if (pair.rfind("connections=", 0) == 0) {
+              if (connections_seen || pair != "connections=1") {
+                return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_connections");
+              }
               connections_seen = single = true;
             } else if (pair.rfind("ttl=", 0) != 0 || ttl_seen || !unsignedNumber(pair.substr(4), ttl) || !ttl || ttl > Grants::max_ttl) {
               return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_ttl");

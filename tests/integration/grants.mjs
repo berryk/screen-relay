@@ -190,7 +190,7 @@ for (const scope of ['watch', 'control']) {
     for (const query of [fragment, `${fragment}&connections=1`, `connections=1&${fragment}`, `ttl=60&${fragment}&connections=1`]) {
       const response = await request('POST', `/grants/${scope}?${query}`, token);
       assert.equal(response.status, 400, `${scope}: oversized query ${query}`);
-      assert.equal(JSON.parse(response.body).error, 'invalid_ttl');
+      assert.equal(JSON.parse(response.body).error, 'invalid_query');
     }
   }
 }
@@ -203,8 +203,11 @@ assert.equal(boundary.connections, 1);
 assert.equal((await request('DELETE', `/grants/${boundary.id}`, token)).status, 200);
 
 // A single-connection grant opens exactly one WebSocket, which stays open.
-assert.equal((await request('POST', '/grants/watch?connections=2', token)).status, 400);
-assert.equal((await request('POST', '/grants/watch?connections=1&connections=1', token)).status, 400);
+for (const query of ['connections=2', 'connections=1&connections=1']) {
+  const response = await request('POST', `/grants/watch?${query}`, token);
+  assert.equal(response.status, 400, query);
+  assert.equal(JSON.parse(response.body).error, 'invalid_connections', query);
+}
 const singleResponse = await request('POST', '/grants/watch?ttl=60&connections=1', token);
 assert.equal(singleResponse.status, 200, singleResponse.body);
 const single = JSON.parse(singleResponse.body);
