@@ -71,8 +71,7 @@ export function msys2Installation(): Msys2Installation {
 
 /** The MSYS2 installation as relay-engine uses it: only the UCRT64 libraries and the directories above them are checked, so running the engine does not read the whole tree. Use msys2Installation before running the MSYS2 shell. */
 export function msys2Libraries(): Msys2Installation {
-  libraries ??= installation ?? detectMsys2(MSYS2_LIBRARIES, MSYS2_LIBRARIES);
-  return libraries;
+  return installation ?? (libraries ??= detectMsys2(MSYS2_LIBRARIES, MSYS2_LIBRARIES));
 }
 
 /** Drops the remembered decisions, so the next check reads the installation again. */
