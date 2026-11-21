@@ -154,6 +154,19 @@ int main() {
     assert(grants.find("0", start + std::chrono::seconds(2)));
   }
   {
+    // A single-connection grant opens one connection, which stays active; a
+    // plain grant can open any number.
+    Grants grants;
+    const auto start = Grants::Clock::now();
+    const auto once = grants.issue("once", GrantScope::control, start, 60, true);
+    const auto many = grants.issue("many", GrantScope::control, start, 60);
+    assert(grants.find("once", start) && grants.claim(once));
+    assert(!grants.find("once", start) && !grants.claim(once));
+    assert(grants.active(once, start));
+    assert(grants.claim(many) && grants.claim(many) && grants.find("many", start));
+    assert(grants.revoke(once) && !grants.active(once, start) && !grants.claim(once));
+  }
+  {
     unsigned char first[300] = {}, second[300] = {};
     assert(secureRandom(first, sizeof(first)) && secureRandom(second, sizeof(second)));
     assert(std::memcmp(first, second, sizeof(first)) != 0);

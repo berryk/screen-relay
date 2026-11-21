@@ -33,10 +33,16 @@ class Grants {
     std::string token;
     GrantScope scope;
     Clock::time_point expires;
+    /** Opens one WebSocket only; `claimed` once it has. */
+    bool single = false;
+    bool claimed = false;
   };
-  uint64_t issue(std::string token, GrantScope scope, Clock::time_point now, uint64_t ttl);
+  uint64_t issue(std::string token, GrantScope scope, Clock::time_point now, uint64_t ttl, bool single = false);
+  /** The live grant for a token, leaving out a single-connection grant that already opened its connection. */
   const Grant* find(const std::string& token, Clock::time_point now) const;
   bool active(uint64_t id, Clock::time_point now) const;
+  /** Records that a grant opened a connection; false when a single-connection grant already did. */
+  bool claim(uint64_t id);
   bool revoke(uint64_t id);
  private:
   std::vector<Grant> grants;
@@ -49,6 +55,10 @@ class Grants {
 bool secureRandom(unsigned char* out, size_t size);
 std::string websocketBearer(lws* wsi);
 bool loopbackOrigin(const std::string& origin);
+/** Whether the Host names this session: a loopback host, or the --public authority. */
+bool localHost(const Config& config, lws* wsi);
+/** Whether a request may come from its Origin header, if it sent one. */
+bool allowedOrigin(const Config& config, lws* wsi);
 bool loopbackHost(const std::string& host);
 /** True for a lowercase https://HOST[:PORT] origin as a browser sends it: no path, wildcard, or default port. */
 bool exactHttpsOrigin(const std::string& origin);

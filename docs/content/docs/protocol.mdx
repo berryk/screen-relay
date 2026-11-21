@@ -60,7 +60,7 @@ A write returns `{"length":N}`, the number of bytes set, and an empty body clear
 | `POST` | <span id="post-input" />`/input` | Sends a batch of binary input records. |
 | `GET`, `POST` | <span id="clipboard" />`/clipboard` | Reads or replaces the clipboard text. |
 | `GET` | <span id="get-metrics" />`/metrics` | Returns stream and resource metrics as JSON. |
-| `POST` | <span id="post-grants" />`/grants/watch`, `/grants/control` | Creates a [grant](/docs/remote-access#grants): a credential that opens only view-only streams, or only streams and `/control`. Add `?ttl=SECONDS`, up to 3600, which is also the default. Returns `id`, `token`, `expires_in`, and `scope` as JSON. |
+| `POST` | <span id="post-grants" />`/grants/watch`, `/grants/control` | Creates a [grant](/docs/remote-access#grants): a credential that opens only view-only streams, or only streams and `/control`. Add `?ttl=SECONDS`, up to 3600, which is also the default, and `connections=1` for a grant that opens one WebSocket. Returns `id`, `token`, `expires_in`, `scope`, and `connections` for a single-connection grant, as JSON. |
 | `DELETE` | <span id="delete-grants" />`/grants/ID` | Revokes the grant with that `id` and closes the connections opened with it. Returns 200. |
 | `GET` | `/`, `/index.html`, `/viewer.js` | Serves the viewer. |
 | WebSocket | `/stream` | Streams video and cursor images when supported. With no query parameter, it claims idle input. Use `?view=1` to watch without input or `?take=1` to take input from the current owner, which closes with code 4001. Add `clipboard=1` to a claiming or takeover stream to receive clipboard notices. |
@@ -73,7 +73,7 @@ The engine sends no CORS headers. A browser page on another origin can open a We
 ## Authentication
 
 - When the session has a token, send `Authorization: Bearer TOKEN`. Do not put the token in a request URL. See [Tokens](/docs/remote-access#tokens).
-- A WebSocket can send a grant's `token` in place of the session token. A watch grant opens `/stream?view=1`. A control grant opens `/stream`, `/stream?take=1`, `/stream?view=1`, and `/control`. Neither opens a URL with `clipboard=1`, and neither authorizes an HTTP request. See [Grants](/docs/remote-access#grants).
+- A WebSocket can send a grant's `token` in place of the session token. A watch grant opens `/stream?view=1`. A control grant opens `/stream`, `/stream?take=1`, `/stream?view=1`, and `/control`. Neither opens a URL with `clipboard=1`, and neither authorizes an HTTP request. A grant WebSocket connects from any origin, including `null`. See [Grants](/docs/remote-access#grants).
 - The `Host` must be `localhost`, `127.0.0.1`, or the authority configured with `--public`, with its port if specified. For the `--public` authority, an uppercase host name and port 443 are normalized before the comparison.
 - `Origin` is optional. Requests without it still need an accepted `Host` and any required token. If present, `Origin` must match the configured `--public` origin, an entry in `--allow-origin`, or a loopback origin whose host and port match the loopback `Host` header. Without `--public`, loopback origins on other ports are also accepted. Other values, including `null`, are rejected. See [Browser origins](/docs/remote-access#browser-origins) for accepted formats and browser HTTP limits.
 

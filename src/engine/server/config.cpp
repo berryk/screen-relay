@@ -172,17 +172,25 @@ bool secureRandom(unsigned char* out, size_t size) {
   return true;
 #endif
 }
-uint64_t Grants::issue(std::string token, GrantScope scope, Clock::time_point now, uint64_t ttl) {
+uint64_t Grants::issue(std::string token, GrantScope scope, Clock::time_point now, uint64_t ttl, bool single) {
   grants.erase(std::remove_if(grants.begin(), grants.end(), [now](const auto& grant) { return now >= grant.expires; }), grants.end());
   if (grants.size() >= capacity || last_id == UINT64_MAX || !ttl || ttl > max_ttl || token.empty() || find(token, now)) return 0;
   const auto id = ++last_id;
-  grants.push_back({id, std::move(token), scope, now + std::chrono::seconds(ttl)});
+  grants.push_back({id, std::move(token), scope, now + std::chrono::seconds(ttl), single});
   return id;
 }
 const Grants::Grant* Grants::find(const std::string& token, Clock::time_point now) const {
   if (token.empty()) return nullptr;
-  for (const auto& grant : grants) if (now < grant.expires && secretEqual(token, grant.token)) return &grant;
+  for (const auto& grant : grants) {
+    if (now < grant.expires && secretEqual(token, grant.token)) return grant.single && grant.claimed ? nullptr : &grant;
+  }
   return nullptr;
+}
+bool Grants::claim(uint64_t id) {
+  const auto entry = std::find_if(grants.begin(), grants.end(), [id](const auto& grant) { return grant.id == id; });
+  if (entry == grants.end() || (entry->single && entry->claimed)) return false;
+  entry->claimed = true;
+  return true;
 }
 bool Grants::active(uint64_t id, Clock::time_point now) const {
   return std::any_of(grants.begin(), grants.end(), [id, now](const auto& grant) { return id == grant.id && now < grant.expires; });
@@ -256,14 +264,18 @@ bool originAllowed(const Config& config, const std::string& origin) {
   if (std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) != config.allowed_origins.end()) return true;
   return config.origin.empty() ? loopbackOrigin(origin) : origin == config.origin;
 }
-bool localRequest(const Config& config, lws* wsi) {
+bool localHost(const Config& config, lws* wsi) {
   const auto host = header(wsi, WSI_TOKEN_HOST);
-  if (!loopbackHost(host) && (config.origin.empty() || httpsAuthority(host) != config.authority)) return false;
+  return loopbackHost(host) || (!config.origin.empty() && httpsAuthority(host) == config.authority);
+}
+bool allowedOrigin(const Config& config, lws* wsi) {
   if (lws_hdr_total_length(wsi, WSI_TOKEN_ORIGIN) <= 0) return true;
+  const auto host = header(wsi, WSI_TOKEN_HOST);
   const auto origin = header(wsi, WSI_TOKEN_ORIGIN);
   return originAllowed(config, origin) ||
          (loopbackHost(host) && loopbackOrigin(origin) && origin.substr(origin.find("://") + 3) == host);
 }
+bool localRequest(const Config& config, lws* wsi) { return localHost(config, wsi) && allowedOrigin(config, wsi); }
 bool unsignedNumber(const std::string& text, uint64_t& value) {
   if (text.empty()) return false;
   const auto parsed = std::from_chars(text.data(), text.data()+text.size(), value);

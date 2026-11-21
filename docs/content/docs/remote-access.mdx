@@ -68,7 +68,7 @@ A browser sends an `Origin` header on WebSocket connections and on cross-origin 
 | Started with `--public` | The `--public` origin, each origin in `--allow-origin`, and a loopback page whose origin uses the same `HOST:PORT` it connects to, such as `http://127.0.0.1:8080`. |
 | Started without `--public` | Loopback origins (`http` or `https`, `localhost` or `127.0.0.1`, any port), and each origin in `--allow-origin`. |
 
-A request from any other origin gets 403 `forbidden`, and a WebSocket fails its handshake. The CLI, the Node SDK, and other clients that send no `Origin` header are not affected.
+A request from any other origin gets 403 `forbidden`, and a WebSocket fails its handshake. The CLI, the Node SDK, and other clients that send no `Origin` header are not affected. A WebSocket that uses a [grant](#grants) skips this check, so a viewer embedded on an opaque or changing origin, such as in an MCP App host, can connect with a grant.
 
 To let a page on another origin connect, such as an app that embeds the viewer, list its origin when you start the session:
 
@@ -156,6 +156,8 @@ Neither scope can read or set the clipboard, take a screenshot over HTTP, send `
    ```sh
    curl -s -X DELETE -H "Authorization: Bearer $(cat ./token)" "https://desktop.example.com/grants/ID"
    ```
+
+Add `connections=1` to create a grant that opens only one WebSocket, such as `?ttl=120&connections=1`. Its connection stays open, and a copied link stops working once the grant has been used.
 
 When a grant is revoked or expires, the engine closes the connections opened with it and refuses new ones. Other viewers and clients stay connected. Grants are kept in memory, so `screen-relay down` ends them all.
 

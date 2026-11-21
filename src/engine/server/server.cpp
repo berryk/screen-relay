@@ -529,10 +529,20 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
           if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) <= 0) {
             return errorResponse(wsi, response, HTTP_STATUS_METHOD_NOT_ALLOWED, "method_not_allowed");
           }
-          const auto args = header(wsi, WSI_TOKEN_HTTP_URI_ARGS);
+          // Query: ttl=SECONDS (1 to 3600) and connections=1 (a single-connection grant), each at most once.
           uint64_t ttl = Grants::max_ttl;
-          if (!args.empty() && (args.rfind("ttl=", 0) != 0 || !unsignedNumber(args.substr(4), ttl) || !ttl || ttl > Grants::max_ttl)) {
-            return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_ttl");
+          bool single = false, ttl_seen = false, connections_seen = false;
+          char arg[64] = {};
+          for (int index = 0; lws_hdr_copy_fragment(wsi, arg, sizeof(arg), WSI_TOKEN_HTTP_URI_ARGS, index) > 0; ++index) {
+            const std::string pair(arg);
+            if (pair.rfind("connections=", 0) == 0 && !connections_seen) {
+              if (pair != "connections=1") return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_connections");
+              connections_seen = single = true;
+            } else if (pair.rfind("ttl=", 0) != 0 || ttl_seen || !unsignedNumber(pair.substr(4), ttl) || !ttl || ttl > Grants::max_ttl) {
+              return errorResponse(wsi, response, HTTP_STATUS_BAD_REQUEST, "invalid_ttl");
+            } else {
+              ttl_seen = true;
+            }
           }
           unsigned char bytes[32];
           if (!secureRandom(bytes, sizeof(bytes))) return errorResponse(wsi, response, HTTP_STATUS_INTERNAL_SERVER_ERROR, "random_failed");
@@ -540,10 +550,11 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
           std::string token;
           for (const unsigned char byte : bytes) { token += digits[byte >> 4]; token += digits[byte & 15]; }
           const auto scope = name == "watch" ? GrantScope::watch : GrantScope::control;
-          const auto id = s->grants.issue(token, scope, Grants::Clock::now(), ttl);
+          const auto id = s->grants.issue(token, scope, Grants::Clock::now(), ttl, single);
           if (!id) return errorResponse(wsi, response, HTTP_STATUS_SERVICE_UNAVAILABLE, "grant_limit");
           return jsonResponse(wsi, response, HTTP_STATUS_OK, "{\"id\":\"" + std::to_string(id) + "\",\"token\":\"" + token +
-            "\",\"expires_in\":" + std::to_string(ttl) + ",\"scope\":\"" + name + "\"}");
+            "\",\"expires_in\":" + std::to_string(ttl) + ",\"scope\":\"" + name + "\"" +
+            (single ? ",\"connections\":1}" : "}"));
         }
         uint64_t id = 0;
         if (!unsignedNumber(name, id) || !id) return errorResponse(wsi, response, HTTP_STATUS_NOT_FOUND, "not_found");
@@ -660,10 +671,15 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
         target += arg;
       }
       const Target parsed = viewerTarget(target);
-      if (parsed.socket == Socket::none || !localRequest(s->config, wsi) || s->nextGeneration == UINT32_MAX) return 1;
+      if (parsed.socket == Socket::none || !localHost(s->config, wsi) || s->nextGeneration == UINT32_MAX) return 1;
       auto* response = static_cast<HttpResponse*>(user);
       response->grant_id = 0;
-      if (!authenticated(s->config, wsi, true)) {
+      // The session token keeps the browser Origin check. A grant is already a
+      // scoped, revocable credential, and MCP App hosts frame viewers on opaque
+      // or per-load origins, so a grant connects from any origin, null included.
+      if (authenticated(s->config, wsi, true)) {
+        if (!allowedOrigin(s->config, wsi)) return 1;
+      } else {
         const auto* grant = s->grants.find(websocketBearer(wsi), Grants::Clock::now());
         if (!grant || parsed.clipboard || (grant->scope == GrantScope::watch && parsed.socket != Socket::watch)) return 1;
         response->grant_id = grant->id;
@@ -684,6 +700,12 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       if (!plan.open) {
         if (socket == Socket::control) { s->evict(wsi, close_busy, "busy"); return 0; }
         return -1;
+      }
+      // Claimed only now, so a connection refused for another reason doesn't
+      // use up a single-connection grant.
+      if (response->grant_id && !s->grants.claim(response->grant_id)) {
+        s->evict(wsi, LWS_CLOSE_STATUS_POLICY_VIOLATION, "grant used");
+        return 0;
       }
       if (socket == Socket::control) {
         s->control = wsi; s->control_generation = ++s->nextGeneration; s->control_received.clear();

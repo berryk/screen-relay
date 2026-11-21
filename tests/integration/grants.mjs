@@ -39,11 +39,12 @@ function ack(generation, sequence) {
  * Opens a WebSocket with the credential as its bearer subprotocol and resolves with null when the engine refuses it.
  * An open connection acknowledges video frames so only the engine's own decision can close it; `done` settles then.
  */
-function connect(path, credential) {
+function connect(path, credential, origin) {
   return new Promise((resolve) => {
     const req = http.request({ path, host: address, port, headers: {
       Host: host, Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
       'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': `nsl1, bearer.${credential}`,
+      ...(origin ? { Origin: origin } : {}),
     } });
     req.on('upgrade', (response, socket, head) => {
       if (response.statusCode !== 101 || response.headers['sec-websocket-protocol'] !== 'nsl1') { socket.destroy(); resolve(null); return; }
@@ -80,8 +81,8 @@ function connect(path, credential) {
 }
 
 /** Reports whether the path opens with the credential, then closes it and lets the engine release its slot and input. */
-async function opens(path, credential) {
-  const connection = await connect(path, credential);
+async function opens(path, credential, origin) {
+  const connection = await connect(path, credential, origin);
   if (!connection) return false;
   connection.close();
   await sleep(400);
@@ -171,7 +172,37 @@ assert.ok(Date.now() - started >= 1500, 'a two-second grant closed early');
 assert.ok(!(await opens(watchPath, brief.token)), 'an expired grant reconnected');
 
 assert.ok(!owner.closed, 'grant expiry closed the owner connection');
+
+// A grant connects from any page origin, null included, because MCP App hosts
+// frame viewers on opaque or per-load origins. The session token keeps the check.
+const anywhere = await grant('watch');
+for (const origin of ['null', 'https://untrusted.example.test', 'https://abc123.claudemcpcontent.com']) {
+  assert.ok(await opens(watchPath, anywhere.token, origin), `the grant did not open from Origin ${origin}`);
+}
+for (const origin of ['null', 'https://untrusted.example.test']) {
+  assert.ok(!(await opens(watchPath, token, origin)), `the session token opened from Origin ${origin}`);
+}
+assert.ok(await opens(watchPath, token, 'https://app.example.test'), 'the session token did not open from an allowed origin');
+
+// A single-connection grant opens exactly one WebSocket, which stays open.
+assert.equal((await request('POST', '/grants/watch?connections=2', token)).status, 400);
+assert.equal((await request('POST', '/grants/watch?connections=1&connections=1', token)).status, 400);
+const singleResponse = await request('POST', '/grants/watch?ttl=60&connections=1', token);
+assert.equal(singleResponse.status, 200, singleResponse.body);
+const single = JSON.parse(singleResponse.body);
+assert.equal(single.connections, 1);
+assert.equal(single.expires_in, 60);
+// Refused for its scope, so it isn't used up.
+assert.ok(!(await opens('/control', single.token, 'null')), 'a single watch grant opened /control');
+const only = await connect(watchPath, single.token, 'null');
+assert.ok(only, 'the single-connection grant did not open its connection');
+assert.ok(!(await opens(watchPath, single.token, 'null')), 'a single-connection grant opened a second connection');
+await sleep(800);
+assert.ok(!only.closed, 'a refused second connection closed the first');
+assert.equal((await request('DELETE', `/grants/${single.id}`, token)).status, 200);
+assert.ok(await closesWithin(only, 2000), 'revoking a single-connection grant left its connection open');
+
 assert.equal((await request('GET', '/capabilities', token)).status, 200);
 owner.close();
-console.log('Grants: scopes enforced, revocation and expiry close live connections, owner unaffected');
+console.log('Grants: scopes enforced, revocation and expiry close live connections, any origin for grants, single-connection grants, owner unaffected');
 process.exit(0);
