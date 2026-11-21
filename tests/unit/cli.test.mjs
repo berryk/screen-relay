@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,7 +13,7 @@ const directory = mkdtempSync(join(root, '.cli-test-'));
 after(() => rmSync(directory, { recursive: true, force: true }));
 const bundle = buildSync({
   stdin: {
-    contents: "export { commands } from './src/cli/commands.ts'; export { parseCommand } from './src/cli/parser.ts'; export { Session, resolveBackend } from './src/cli/host/supervisor.ts'; export { cmdRun, detachedSupervisorSpawn } from './src/cli/host/session_commands.ts'; export { formatReady } from './src/cli/output.ts'; export { planSetup } from './src/cli/host/setup.ts';",
+    contents: "export { commands } from './src/cli/commands.ts'; export { parseCommand } from './src/cli/parser.ts'; export { Session, resolveBackend } from './src/cli/host/supervisor.ts'; export { cmdRun, detachedSupervisorSpawn } from './src/cli/host/session_commands.ts'; export { writePrivateFile } from './src/cli/host/state.ts'; export { formatReady } from './src/cli/output.ts'; export { planSetup } from './src/cli/host/setup.ts';",
     resolveDir: root,
   },
   bundle: true,
@@ -25,7 +25,7 @@ const bundle = buildSync({
 });
 const bundlePath = join(directory, 'parser.mjs');
 writeFileSync(bundlePath, bundle.outputFiles[0].contents);
-const { commands, parseCommand, Session, resolveBackend, cmdRun, detachedSupervisorSpawn, formatReady, planSetup } = await import(pathToFileURL(bundlePath).href);
+const { commands, parseCommand, Session, resolveBackend, cmdRun, detachedSupervisorSpawn, writePrivateFile, formatReady, planSetup } = await import(pathToFileURL(bundlePath).href);
 
 test('every metadata example parses through the command parser', () => {
   for (const [name, command] of Object.entries(commands)) {
@@ -78,12 +78,15 @@ test('--encoder and repeated --ice-server take validated values from flags and t
 
   const detached = detachedSupervisorSpawn(
     ['up', '-d', '--ice-server', servers[0], `--ice-server=${servers[1]}`, '--port', '8081'],
-    { PATH: '/usr/bin' },
-    servers,
+    { PATH: '/usr/bin', SCREEN_RELAY_ICE_SERVERS: servers.join(' ') },
+    join(directory, 'desk', 'ice-servers'),
   );
   assert.deepEqual(detached.args, ['up', '-d', '--port', '8081']);
-  assert.equal(detached.env.SCREEN_RELAY_ICE_SERVERS, servers.join(' '));
+  assert.equal(detached.env.SCREEN_RELAY_ICE_SERVERS, undefined);
+  assert.equal(detached.env.SCREEN_RELAY_ICE_SERVERS_FILE, join(directory, 'desk', 'ice-servers'));
   assert.equal(detached.env.SCREEN_RELAY_READY_FD, '3');
+  assert.ok(!JSON.stringify(detached).includes('user:pass'));
+  assert.equal(detachedSupervisorSpawn(['up', '-d'], {}, undefined).env.SCREEN_RELAY_ICE_SERVERS_FILE, undefined);
 });
 
 test('an empty SCREEN_RELAY_CONFIG is treated as unset', () => {
@@ -209,6 +212,17 @@ if (process.argv.includes('--help')) {
     await session.cleanup();
     session = undefined;
     assert.equal(existsSync(iceFilePath), false);
+
+    writePrivateFile(iceFilePath, `${servers.join('\n')}\n`);
+    session = new Session({ command: 'up', json: true, name: 'encode', port, resolution: '1280x720', fps: 60, bitrateMin: 1000000, bitrateStart: 8000000, bitrateMax: 40000000, timeout: 5, 'ice-servers-file': iceFilePath }, sessionDir);
+    await session.start();
+    const prepared = JSON.parse(readFileSync(join(sessionDir, 'engine-invocation.json'), 'utf8')).args;
+    assert.equal(prepared[prepared.indexOf('--ice-servers-file') + 1], iceFilePath);
+    assert.ok(!prepared.some((value) => value.includes('user:pass')));
+    assert.equal(readFileSync(iceFilePath, 'utf8'), `${servers.join('\n')}\n`);
+    await session.cleanup();
+    session = undefined;
+    assert.equal(existsSync(iceFilePath), false);
   } finally {
     if (session) await session.cleanup();
     rmSync(engine, { force: true });
@@ -218,6 +232,33 @@ if (process.argv.includes('--help')) {
       else process.env[key] = previous[key];
     }
   }
+});
+
+test('a private session file replaces a symlink at its path instead of writing through it', { skip: process.platform === 'win32' }, () => {
+  const target = join(directory, 'symlink-target.txt');
+  writeFileSync(target, 'keep');
+  const path = join(directory, 'symlink-ice-servers');
+  symlinkSync(target, path);
+  writePrivateFile(path, 'turn:user:pass@turn.example.com:3478\n');
+  assert.equal(readFileSync(target, 'utf8'), 'keep');
+  assert.equal(readFileSync(path, 'utf8'), 'turn:user:pass@turn.example.com:3478\n');
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  rmSync(path, { force: true });
+  rmSync(target, { force: true });
+});
+
+test('down removes a private ICE server file left in the session directory', () => {
+  const state = join(directory, 'down-state');
+  const sessionDir = join(state, 'screen-relay', 'desk');
+  mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  const file = join(sessionDir, 'ice-servers');
+  writeFileSync(file, 'turn:user:pass@turn.example.com:3478\n', { mode: 0o600 });
+  const result = spawnSync(process.execPath, [cli, 'down', '--name', 'desk', '--json'], {
+    encoding: 'utf8', timeout: 15000, env: { ...process.env, XDG_STATE_HOME: state },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(file), false);
 });
 
 test('--public keeps the engine on loopback unless a bind address is supplied', { skip: process.platform !== 'linux' }, async () => {

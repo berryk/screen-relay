@@ -319,7 +319,7 @@ type Validator = (value: unknown, path: string) => unknown;
 const validators = {
   'display.resolution': resolution,
   'display.compositor': compositorValue,
-  'stream.fps': (value, path) => integer(value, path, 10, 120),
+  'stream.fps': (value, path) => integer(value, path, 10, 240),
   'stream.encoder': (value, path) => {
     const name = textValue(value, path);
     if (!encoderName(name)) wrong(path, value, 'auto, x264, or a name of letters, digits and underscores');

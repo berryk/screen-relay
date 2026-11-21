@@ -10,6 +10,7 @@ const checkTypes = async () => {
   const encoderState: string | undefined = (await capabilities()).encoder_state;
   const rtc: boolean | undefined = (await capabilities()).rtc;
   const iceServers: number | undefined = (await capabilities()).ice_servers;
+  const transferTier: string | undefined = (await capabilities()).transfer_tier;
   // @ts-expect-error The encoder name is a string when present, not a number.
   const numericEncoder: number | undefined = (await capabilities()).encoder;
   await capabilities({ url: 'https://127.0.0.1:18094', ca: 'ca.pem' });
@@ -22,6 +23,6 @@ const checkTypes = async () => {
   await desktop.input({ type: 'keyDown' });
   const error: Error = new RelayError('NETWORK_ERROR', 'Unavailable');
   desktop.close();
-  return { pixels, width, encoder, hardwareEncoder, encoderState, rtc, iceServers, numericEncoder, error };
+  return { pixels, width, encoder, hardwareEncoder, encoderState, rtc, iceServers, transferTier, numericEncoder, error };
 };
 void checkTypes;

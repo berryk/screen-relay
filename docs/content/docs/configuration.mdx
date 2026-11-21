@@ -38,7 +38,7 @@ display:
   resolution: 1280x720
 
 stream:
-  # 10..120.
+  # 10..240.
   fps: 60
   # auto, x264, or a hardware encoder name.
   encoder: auto
@@ -85,8 +85,8 @@ nano ~/.config/screen-relay/config.yaml
 | --- | --- | --- | --- | --- |
 | `display.resolution` | `1280x720` | The desktop size as `WIDTHxHEIGHT`, both even. Width 320 to 16384, height 240 to 16384. Ignored with `--display` and on macOS and Windows, which use the existing screen's size. | None | `SCREEN_RELAY_RESOLUTION` |
 | `display.compositor` | `auto` | `auto`, `on`, or `off`. Whether the XFCE desktop that screen-relay starts runs its compositor, which draws window shadows and transparency and repaints at most 60 times a second. `auto` turns it off when `stream.fps` is above 60. Ignored with `--display` and for any other desktop. | None | `SCREEN_RELAY_COMPOSITOR` |
-| `stream.fps` | `60` | Whole number from 10 to 120 | None | `SCREEN_RELAY_FPS` |
-| `stream.encoder` | `auto` | `auto` probes for a hardware encoder and falls back to `x264`; `x264` uses software encoding only; any other name requests that hardware encoder (such as `h264_videotoolbox` on macOS, or `h264_nvenc`, `h264_qsv`, `h264_amf`, and `h264_vaapi` elsewhere) and falls back to `x264` if unavailable. Use letters, digits, and `_`. | `--encoder` | `SCREEN_RELAY_ENCODER` |
+| `stream.fps` | `60` | Whole number from 10 to 240 | None | `SCREEN_RELAY_FPS` |
+| `stream.encoder` | `auto` | `auto` probes for a hardware encoder, keeps it while it holds the frame budget set by `stream.fps`, and adapts back to `x264` when it fails or falls behind. `x264` uses software encoding only. Any other name (such as `h264_videotoolbox` on macOS, or `h264_nvenc`, `h264_qsv`, `h264_amf`, and `h264_vaapi` elsewhere) pins that encoder and falls back to `x264` only when it errors. Use letters, digits, and `_`. | `--encoder` | `SCREEN_RELAY_ENCODER` |
 | `stream.bitrate.min` | `1M` | 250000 to 100000000, as a whole number or with a `k` (thousand) or `M` (million) suffix. No higher than `start`. | None | `SCREEN_RELAY_BITRATE_MIN` |
 | `stream.bitrate.start` | `8M` | Same values as `min`. The stream adjusts between `min` and `max` from here. | None | `SCREEN_RELAY_BITRATE_START` |
 | `stream.bitrate.max` | `40M` | Same values as `min`. No lower than `start`. | None | `SCREEN_RELAY_BITRATE_MAX` |

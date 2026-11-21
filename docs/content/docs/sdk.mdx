@@ -77,7 +77,7 @@ Coordinates are fractions from `0` to `1`, measured from the top-left. See [Inpu
 
 `capabilities(options)`, `status(options)`, and `screenshot(options, path?)` are also standalone exports. `screenshot` returns PNG bytes and writes them to `path` when one is given.
 
-`capabilities` also includes `rtc`, which is `true` when the engine offers WebRTC, and `ice_servers`, the number of configured STUN and TURN servers.
+`capabilities` also includes `rtc`, which is `true` when the engine offers WebRTC; `ice_servers`, the number of configured STUN and TURN servers; and `transfer_tier`, which reports how frames reach the encoder (`zero_copy`, `dirty_upload`, `full_upload`, or `software`).
 
 Input batches:
 

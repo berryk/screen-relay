@@ -36,7 +36,7 @@ agent or CLI/SDK input over /input (HTTP) or /control (WebSocket)
   -> selected display
 ```
 
-Only one of the viewers, `/control`, and `/input` owns input at a time. A WebRTC viewer counts as a viewer.
+Only one of the viewers, `/control`, and `/input` owns input at a time. A WebRTC viewer counts as a viewer, and several WebRTC viewers can hold a session each.
 
 `connectionPlan` in `src/engine/server/wire.cpp` is the connection state machine: it decides whether a new `/stream` or `/control` socket opens and which open socket it closes, and `server-test` checks every row of its table.
 
@@ -53,7 +53,7 @@ One `EncoderController` in `src/engine/core/encoder.cpp` owns the encoder for ev
 | `software_active` | x264 is publishing frames. |
 | `failed` | No encoder can continue, so the engine stops. |
 
-`stream.encoder`, `--encoder`, and `SCREEN_RELAY_ENCODER` set the preference. `auto` tries VideoToolbox first on macOS, then the libavcodec candidates, and falls back to x264. `x264` opens the software encoder only. Any other name requests that encoder through the hardware factory and falls back to x264 if it cannot open or fails the probe.
+`stream.encoder`, `--encoder`, and `SCREEN_RELAY_ENCODER` set the preference. `auto` tries VideoToolbox first on macOS, then the libavcodec candidates, keeps a hardware encoder while it holds the frame budget set by `stream.fps`, and adapts back to x264 when it fails or falls behind. `x264` opens the software encoder only. Any other name pins that encoder through the hardware factory and falls back to x264 only when it errors.
 
 A candidate passes only when it encodes a forced IDR that carries AVC IDR, SPS, and PPS NAL units. The probe records the stream's `profile-level-id` and resets the encoder. A candidate that fails the probe gets a 30 second cooldown, and `auto` continues with the next one.
 
@@ -72,8 +72,8 @@ Runtime failures follow one path:
 - `CaptureSource` (`src/engine/core/capture-source.hpp`): `fd()`, `dimensions()`, `drainDamage()`, `pixelFormat()`, `capture()`. A frame is a non-owning CPU view (BGRA or ARGB), valid until the next capture. `captureNative(full)` may attach an OS GPU handle in `FrameView::native_handle` for a zero-copy encoder. Optional `cursorSupported()` and `cursor(force)`.
 - `VideoEncoder` (`src/engine/core/encoder.hpp`): `name()`, `hardware()`, `inputFormat()` (`nv12`, `bgra`, or `native_handle`), `maxInflight()`, `planes()`, `submit(request)`, `poll(results, wait)`, `flush(results)`, and `reset(error)`. Software encoders complete a frame before `submit` returns; hardware encoders pipeline frames and call the ready callback.
 - `EncoderController` (`src/engine/core/encoder.hpp`): owns one `VideoEncoder`, probes candidates, counts drops and failures, applies cooldowns, and moves between the states in [Encoder](#encoder). `evaluate()` turns one `EncodeResult` into an `EncoderDecision` (`publish`, `drop`, `recover_idr`, or `fatal`), so every transition happens in one place.
-- `StreamHub` (`src/engine/server/stream-hub.hpp`): owns the single `CaptureEncoder` and one `Subscriber` per viewer, covering WebSocket viewers and a WebRTC session. Each subscriber has its own `ViewerState` (`disconnected`, `awaiting_idr`, `streaming`, `closing`), its own wire sequence, and its own `FlowControl`. The hub picks one driver for encoder flow control: the controlling viewer, else a watching viewer, else the WebRTC subscriber.
-- `RtcSession` (`src/engine/server/rtc.hpp`): one explicit state machine (`idle`, `gathering`, `connecting`, `connected`, `closing`, `closed`) around one peer connection. It takes the offer, gathers ICE candidates on its own thread, pushes shared frames once the H.264 track opens, and drains 16-byte input records from the `input` data channel.
+- `StreamHub` (`src/engine/server/stream-hub.hpp`): owns the single `CaptureEncoder` and one `Subscriber` per viewer, covering WebSocket viewers and each WebRTC session. Each subscriber has its own `ViewerState` (`disconnected`, `awaiting_idr`, `streaming`, `closing`), its own wire sequence, and its own `FlowControl`. The hub picks one driver for encoder flow control: the controlling viewer, else a watching viewer, else a WebRTC subscriber.
+- `RtcSession` (`src/engine/server/rtc.hpp`): one explicit state machine (`idle`, `gathering`, `connecting`, `connected`, `closing`, `closed`) around one peer connection. It takes the offer, gathers ICE candidates on its own thread, pushes shared frames once the H.264 track opens, and drains 16-byte input records from the `input` data channel. The `events` data channel carries cursor updates, owner clipboard notices, and viewer ACKs.
 - `InputBackend` (`src/engine/core/input.hpp`): platform primitives only: `nativeKey(usage)`, `pressKey`, `releaseKey`, `typeText(codepoint)`, `pressButton`, `releaseButton`, `move`, `scroll`, `resetLocks`, `fence(mark)`, `pending`, `cancel`, `flush`, `dimensions`, `name`. A backend may queue its work on its own thread. `pending` counts the events still queued, and the service thread refuses a batch that would take the queue past 1024 events. `fence` completes a caller's `InputFence` after everything posted before it. `cancel` drops queued text and moves as not applied while keeping key and button releases, and reports how many records were dropped.
 - `InputController` (`src/engine/core/input.hpp`): owns one `InputBackend`, validates each `InputEvent`, maps normalized pointer coordinates to pixels, dedupes held keys and buttons by native key id, and releases everything on `releaseAll`. `resetLocks` turns Caps Lock off when a new input session starts. It forwards `fence` and `cancel` to the backend and returns `InputStatus`: `invalid` for a rejected event, `unsupported` when the backend has no native key for a usage or cannot type a codepoint.
 - `InputQueue` (`src/engine/core/input.hpp`): the backend work queue. It counts one protocol record as one queued unit however many platform jobs that record posts, so admission, `pending`, and cancelled-record counts share one unit. `cancel` drops queued text and moves and leaves each fence it covered in worker order, so the worker completes it as not applied after the backend's fence.
@@ -111,7 +111,7 @@ Runtime failures follow one path:
 | Decrease | Without TCP statistics: target x 0.75 (and at most 90% of measured goodput) when 2+ frames and enough bytes are outstanding, the standing network queue is at least half the pause queue, and 500 ms since the last decrease. The floor is the configured minimum. |
 | Increase | Without TCP statistics: target x 1.10 after a busy 1 s sample, the standing network queue is below a quarter of the pause queue, 1 s since last increase, 2 s since last decrease. |
 
-Engine flags: `--fps` takes 10 to 120. `--bitrate-min`, `--bitrate-start`, and `--bitrate-max` take bits per second with `250000 <= min <= start <= max <= 100000000`. `relay-engine --help` lists them with their defaults.
+Engine flags: `--fps` takes 10 to 240. `--bitrate-min`, `--bitrate-start`, and `--bitrate-max` take bits per second with `250000 <= min <= start <= max <= 100000000`. `relay-engine --help` lists them with their defaults.
 
 Each ACK carries the time the frame spent in the viewer, from arrival until it was drawn or superseded. The engine subtracts that wait from the capture-to-ACK time to estimate how much of the delay is in the network.
 
@@ -184,7 +184,7 @@ npm test             # TypeScript unit tests
 
 `make test-encoder-state` checks the encoder state machine and `make test-stream-hub` checks the shared pipeline and subscriber flow.
 
-`make RTC=1` defines `-DRELAY_RTC` and links `libdatachannel`, using its pkg-config file or a Homebrew install under `/opt/homebrew`. Without it, `GET /rtc/config` reports `enabled: false` and the viewer uses the WebSocket stream.
+`make RTC=1` defines `-DRELAY_RTC` and links `libdatachannel`, using its pkg-config file or a Homebrew install under `/opt/homebrew`. Without it, `GET /rtc/config` reports `enabled: false` and the viewer stays on the WebSocket stream. With it, `#transport=auto`, the default, starts on the WebSocket stream and upgrades to WebRTC in the background once ICE succeeds. `#transport=rtc` adds a WebSocket fallback, `#transport=rtc-only` drops it, and `#transport=ws` skips WebRTC.
 
 On Windows, build with [MSYS2](https://www.msys2.org/) in the UCRT64 environment, where `make` selects the `windows` backend:
 

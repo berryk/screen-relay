@@ -15,8 +15,8 @@ Precedence, highest first:
 | --- | --- | --- | --- |
 | `display.resolution` | `1280x720` | `WIDTHxHEIGHT`; even width `320..16384`, even height `240..16384` | `SCREEN_RELAY_RESOLUTION` |
 | `display.compositor` | `auto` | `auto`, `on` or `off`, for the XFCE desktop screen-relay starts; `auto` turns the compositor off when `stream.fps` is above 60 | `SCREEN_RELAY_COMPOSITOR` |
-| `stream.fps` | `60` | `10..120` | `SCREEN_RELAY_FPS` |
-| `stream.encoder` | `auto` | `auto` probes for a hardware encoder and falls back to x264, `x264` uses software, or a hardware encoder name such as `h264_videotoolbox`. Use letters, digits and `_`. | `SCREEN_RELAY_ENCODER` |
+| `stream.fps` | `60` | `10..240` | `SCREEN_RELAY_FPS` |
+| `stream.encoder` | `auto` | `auto` probes for a hardware encoder, keeps it while it holds the frame budget set by `stream.fps`, and adapts back to x264 when it fails or falls behind; `x264` uses software; any other name pins that hardware encoder, such as `h264_videotoolbox`, and falls back to x264 only on error. Use letters, digits and `_`. | `SCREEN_RELAY_ENCODER` |
 | `stream.bitrate.min` | `1M` | Bits per second, `250000..100000000`; a `k` or `M` suffix is 1000-based | `SCREEN_RELAY_BITRATE_MIN` |
 | `stream.bitrate.start` | `8M` | As above | `SCREEN_RELAY_BITRATE_START` |
 | `stream.bitrate.max` | `40M` | As above; require min <= start <= max | `SCREEN_RELAY_BITRATE_MAX` |

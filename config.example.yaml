@@ -8,7 +8,7 @@ display:
   compositor: auto
 
 stream:
-  # 10..120.
+  # 10..240.
   fps: 60
   # Bits per second, 250000..100000000. A k or M suffix is 1000-based.
   # Require min <= start <= max.

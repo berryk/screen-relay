@@ -102,11 +102,11 @@ test('validates server.allow_origin as exact HTTPS or loopback HTTP origins', ()
 
 test('validates the FPS range in YAML and keeps the default at 60', () => {
   assert.equal(config.loadConfig(write('{}\n'))[0].stream.fps, 60);
-  for (const fps of [10, 60, 61, 120]) {
+  for (const fps of [10, 60, 61, 240]) {
     assert.equal(config.loadConfig(write(`stream:\n  fps: ${fps}\n`))[0].stream.fps, fps);
   }
-  for (const fps of [9, 121]) {
-    assert.throws(() => config.loadConfig(write(`stream:\n  fps: ${fps}\n`)), /stream\.fps.*allowed 10\.\.120/);
+  for (const fps of [9, 241]) {
+    assert.throws(() => config.loadConfig(write(`stream:\n  fps: ${fps}\n`)), /stream\.fps.*allowed 10\.\.240/);
   }
 });
 
@@ -114,16 +114,17 @@ test('validates FPS overrides from arguments and SCREEN_RELAY_FPS', () => {
   const [settings, , present] = config.loadConfig(write('{}\n'));
   const previous = process.env.SCREEN_RELAY_FPS;
   try {
-    process.env.SCREEN_RELAY_FPS = '120';
+    process.env.SCREEN_RELAY_FPS = '240';
     const args = {};
     config.applyTo(args, settings, present);
-    assert.equal(args.fps, 120);
-    process.env.SCREEN_RELAY_FPS = '121';
-    assert.throws(() => config.applyTo({}, settings, present), /SCREEN_RELAY_FPS.*allowed 10\.\.120/);
-    const explicit = { fps: 120 };
+    assert.equal(args.fps, 240);
+    process.env.SCREEN_RELAY_FPS = '241';
+    assert.throws(() => config.applyTo({}, settings, present), /SCREEN_RELAY_FPS.*allowed 10\.\.240/);
+    const explicit = { fps: 240 };
     config.applyTo(explicit, settings, present);
-    assert.equal(explicit.fps, 120);
-    assert.throws(() => config.applyTo({ fps: 121 }, settings, present), /--fps.*allowed 10\.\.120/);
+    assert.equal(explicit.fps, 240);
+    assert.throws(() => config.applyTo({ fps: 241 }, settings, present), /--fps.*allowed 10\.\.240/);
+    assert.throws(() => config.applyTo({ fps: 9 }, settings, present), /--fps.*allowed 10\.\.240/);
   } finally {
     if (previous === undefined) delete process.env.SCREEN_RELAY_FPS;
     else process.env.SCREEN_RELAY_FPS = previous;
