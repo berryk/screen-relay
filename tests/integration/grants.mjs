@@ -184,6 +184,24 @@ for (const origin of ['null', 'https://untrusted.example.test']) {
 }
 assert.ok(await opens(watchPath, token, 'https://app.example.test'), 'the session token did not open from an allowed origin');
 
+// An oversized fragment must fail, not end parsing and silently drop later constraints.
+for (const scope of ['watch', 'control']) {
+  for (const fragment of [`ttl=${'0'.repeat(59)}1`, `x=${'a'.repeat(62)}`]) {
+    for (const query of [fragment, `${fragment}&connections=1`, `connections=1&${fragment}`, `ttl=60&${fragment}&connections=1`]) {
+      const response = await request('POST', `/grants/${scope}?${query}`, token);
+      assert.equal(response.status, 400, `${scope}: oversized query ${query}`);
+      assert.equal(JSON.parse(response.body).error, 'invalid_ttl');
+    }
+  }
+}
+// A 63-byte fragment still fits, including room for its terminator.
+const boundaryResponse = await request('POST', `/grants/watch?ttl=${'0'.repeat(57)}60&connections=1`, token);
+assert.equal(boundaryResponse.status, 200, boundaryResponse.body);
+const boundary = JSON.parse(boundaryResponse.body);
+assert.equal(boundary.expires_in, 60);
+assert.equal(boundary.connections, 1);
+assert.equal((await request('DELETE', `/grants/${boundary.id}`, token)).status, 200);
+
 // A single-connection grant opens exactly one WebSocket, which stays open.
 assert.equal((await request('POST', '/grants/watch?connections=2', token)).status, 400);
 assert.equal((await request('POST', '/grants/watch?connections=1&connections=1', token)).status, 400);
