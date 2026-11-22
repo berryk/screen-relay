@@ -1,0 +1,7 @@
+{
+  "name": "screen-relay-udp-bridge",
+  "private": true,
+  "type": "module",
+  "description": "WebRTC data channel (UDP) front end for a screen-relay engine",
+  "dependencies": { "node-datachannel": "^0.32.0" }
+}

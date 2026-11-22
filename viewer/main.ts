@@ -2,6 +2,7 @@ import {
   CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, encodeResize, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
   type InputEvent, type Message,
 } from '../src/protocol/index.js';
+import { UdpSocket } from './udp.js';
 
 const keys = HID_KEYS;
 const canvas = document.querySelector('#screen') as HTMLCanvasElement,
@@ -575,7 +576,11 @@ function connect() {
     : sync ? '/stream?clipboard=1' : '/stream';
   takeRequested = false;
   const target = socketTarget(new URL(`${location.protocol}//${location.host}`), path, accessToken);
-  socket = new WebSocket(target.url, target.protocols);
+  // Opt in with ?udp=1 (remembered; ?udp=0 turns it off). Falls back to the WebSocket by itself.
+  const udpChoice = new URLSearchParams(location.search || '').get('udp');
+  if (udpChoice === '1' || udpChoice === '0') store('relay.udp', udpChoice);
+  const useUdp = stored('relay.udp') === '1' && typeof RTCPeerConnection !== 'undefined';
+  socket = useUdp ? new UdpSocket(target.url, target.protocols, path) as unknown as WebSocket : new WebSocket(target.url, target.protocols);
   transportBroken = false;
   loadCapabilities();
   const ws = socket;
@@ -898,7 +903,8 @@ const METRICS_UNAVAILABLE = 'Cgroup CPU (one core): unavailable · Cgroup RAM: u
 let hudTimer: any, metricsRequest: AbortController | null, configuredFps = 0;
 function hudText(fps: number, mbps: number, metrics: string) {
   const stream = `Stream ${canvas.width}x${canvas.height}${configuredFps ? ` @ ${configuredFps} fps` : ''}`;
-  return `${stream} · Drawn FPS: ${fps.toFixed(1)} · Stream Mbps: ${mbps.toFixed(2)} · ${metrics}`;
+  const transport = (socket as any)?.transport === 'udp' ? 'UDP' : 'WebSocket';
+  return `${stream} · ${transport} · Drawn FPS: ${fps.toFixed(1)} · Stream Mbps: ${mbps.toFixed(2)} · ${metrics}`;
 }
 function loadCapabilities() {
   if (access !== 'owner') return;
