@@ -1,8 +1,25 @@
 # screen-relay
 
-## 0.1.4
+## 0.1.5
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **pasting into the remote desktop**, which failed when the viewer lost focus, read an empty host clipboard, or missed the paste shortcut on the desktop canvas (#101)
+- Fixed **clipboard notices** echoing the engine's own writes. A stream opened with `clipboard=1` now gets a notice only when a desktop application changes the clipboard, not after `POST /clipboard` (#101)
+
+### Improvements
+
+- The **desktop clipboard** handles more text formats on X11, Wayland, and Windows, so more applications can exchange text with the viewer (#101)
+
+### Contributors
+
+- @lahfir
+
+<!-- release:end -->
+
+## 0.1.4
 
 ### New Features
 
@@ -22,8 +39,6 @@
 
 - @joshuasoup
 - @lahfir
-
-<!-- release:end -->
 
 ## 0.1.3
 
