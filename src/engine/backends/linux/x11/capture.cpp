@@ -6,6 +6,7 @@
 #include <X11/extensions/Xfixes.h>
 #include <sys/shm.h>
 #include <atomic>
+#include <cstdio>
 #include <stdexcept>
 #include <mutex>
 #include <algorithm>
@@ -19,6 +20,14 @@ std::atomic<Display*> probe_display{nullptr};
 std::atomic<bool> probe_error{false};
 std::atomic<XErrorHandler> previous_handler{nullptr};
 std::mutex attach_mutex;
+// Xlib's default handler exits the process on any protocol error. A desktop
+// resize can race a capture (XShmGetImage at the old, larger size fails with
+// BadMatch), so log errors instead; the failed call returns an error status
+// and the capture loop recovers once it sees the new size.
+int nonFatalError(Display*, XErrorEvent* event) {
+  std::fprintf(stderr, "X error %d (request %d.%d) ignored\n", event->error_code, event->request_code, event->minor_code);
+  return 0;
+}
 int attachError(Display* display, XErrorEvent* event) {
   if (display == probe_display.load()) { probe_error = true; return 0; }
   const auto previous = previous_handler.load();
@@ -37,6 +46,7 @@ class X11CaptureSource final : public CaptureSource {
   int cursor_event = 0;
   int width = 0, height = 0;
   bool cursor_dirty = true;
+  bool size_changed = false;
  public:
   X11CaptureSource() { shm.shmid = -1; shm.shmaddr = reinterpret_cast<char*>(-1); }
   ~X11CaptureSource() override {
@@ -88,6 +98,8 @@ class X11CaptureSource final : public CaptureSource {
     require(damage != 0, "creating XDamage failed");
     parts = XFixesCreateRegion(display, nullptr, 0);
     XFixesSelectCursorInput(display, RootWindow(display, screen), XFixesDisplayCursorNotifyMask);
+    // A RandR resize of the root window arrives as ConfigureNotify.
+    XSelectInput(display, RootWindow(display, screen), StructureNotifyMask);
     XFlush(display);
   }
   int fd() const override { return ConnectionNumber(display); }
@@ -98,9 +110,12 @@ class X11CaptureSource final : public CaptureSource {
       XEvent event; XNextEvent(display, &event);
       if (event.type == damage_event + XDamageNotify) dirty = true;
       if (event.type == cursor_event + XFixesCursorNotify) cursor_dirty = true;
+      if (event.type == ConfigureNotify && event.xconfigure.window == RootWindow(display, DefaultScreen(display)) &&
+          (event.xconfigure.width != width || event.xconfigure.height != height)) size_changed = true;
     }
     return dirty;
   }
+  bool sizeChanged() const override { return size_changed; }
   bool cursorSupported() const override { return true; }
   std::optional<CursorImage> cursor(bool force) override {
     if (!force && !cursor_dirty) return std::nullopt;
@@ -194,7 +209,10 @@ namespace x11 {
 bool initializeNativeBackend(const std::string&) {
   static std::once_flag once;
   static bool initialized = false;
-  std::call_once(once, [] { initialized = XInitThreads() != 0; });
+  std::call_once(once, [] {
+    initialized = XInitThreads() != 0;
+    XSetErrorHandler(nonFatalError);
+  });
   return initialized;
 }
 std::unique_ptr<CaptureSource> makeCaptureSource() {

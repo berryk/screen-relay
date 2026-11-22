@@ -13,6 +13,7 @@ extern "C" {
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -264,13 +265,81 @@ static void fullScreenDamage(int width, int height) {
   encoder.stop();
   decodedStripes({initial, changed}, width, height);
 }
+// A source whose desktop size can change under it, like an X display resized with RandR.
+struct ResizeState : SourceState { std::atomic<int> width{1280}, height{720}; };
+class ResizableSource final : public relay::CaptureSource {
+  std::shared_ptr<ResizeState> state;
+  int width, height;
+  std::vector<uint8_t> pixels;
+ public:
+  explicit ResizableSource(std::shared_ptr<ResizeState> s)
+      : state(std::move(s)), width(state->width), height(state->height), pixels(size_t(width) * size_t(height) * 4) {}
+  relay::WaitHandle fd() const override { return state->wake.handle(); }
+  std::pair<int, int> dimensions() const override { return {width, height}; }
+  bool drainDamage() override { return state->wake.consume(); }
+  bool sizeChanged() const override { return state->width != width || state->height != height; }
+  relay::PixelFormat pixelFormat() const override { return relay::PixelFormat::BGRA; }
+  relay::FrameView capture() override {
+    ++state->captures;
+    const bool red = state->red.load();
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+      pixels[i] = red ? 48 : 96; pixels[i + 1] = red ? 64 : 176;
+      pixels[i + 2] = red ? 192 : 32; pixels[i + 3] = 255;
+    }
+    return {pixels.data(), width * 4, width, height, relay::PixelFormat::BGRA};
+  }
+};
+static void resizeEndsGeneration() {
+  auto state = std::make_shared<ResizeState>(); Frames frames;
+  std::mutex mutex; std::condition_variable changed;
+  std::vector<std::tuple<uint32_t, int, int>> resizes;
+  relay::CaptureEncoder encoder([&](relay::EncodedFrame&& f) { return frames.publish(std::move(f)); },
+      capture_settings, [state] { return std::make_unique<ResizableSource>(state); }, {},
+      [&](uint32_t gen, int w, int h) {
+        { std::lock_guard<std::mutex> lock(mutex); resizes.emplace_back(gen, w, h); }
+        changed.notify_all();
+      });
+  std::string error; require(encoder.start(error), error.c_str());
+  encoder.beginSession(30);
+  const auto initial = frames.at(0);
+  require(initial.width == 1280 && initial.height == 720, "initial frame has the wrong size");
+  encoder.acknowledge(30, 1);
+  state->width = 1600; state->height = 900; state->red = true; state->damage();
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    require(changed.wait_for(lock, 3s, [&] { return !resizes.empty(); }), "resize was not reported");
+    require(resizes.front() == std::make_tuple(30u, 1600, 900), "resize reported the wrong generation or size");
+  }
+  std::this_thread::sleep_for(100ms);
+  { std::lock_guard<std::mutex> lock(frames.mutex);
+    require(frames.items.size() == 1, "the ended generation received a frame after the resize"); }
+  encoder.endSession(30); encoder.beginSession(31);
+  const auto fresh = frames.at(1);
+  require(fresh.generation == 31 && fresh.sequence == 1 && fresh.keyframe && fresh.width == 1600 && fresh.height == 900,
+          "the next generation did not start with a keyframe at the new size");
+  decodedPixel(fresh, true, 1600, 900);
+  // Resizing with no session ends no generation, and the next one uses the new size.
+  encoder.endSession(31);
+  state->width = 1024; state->height = 768; state->damage();
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    require(changed.wait_for(lock, 3s, [&] { return resizes.size() == 2; }), "idle resize was not reported");
+    require(resizes.back() == std::make_tuple(0u, 1024, 768), "idle resize reported a generation");
+  }
+  encoder.beginSession(32);
+  const auto idle = frames.at(2);
+  require(idle.generation == 32 && idle.keyframe && idle.width == 1024 && idle.height == 768,
+          "a session after an idle resize did not use the new size");
+  encoder.stop();
+  require(encoder.error().empty(), "resize produced a fatal error");
+}
 int main() {
   try {
     healthySource(); runtimeSize(1920, 1080); runtimeSize(1366, 768); runtimeSize(3840, 2160);
     runtimeSize(1280, 720, 120);
     fullScreenDamage(1920, 1080); fullScreenDamage(1366, 768);
-    identicalDamageRefines(); invalidSource(1); invalidSource(2);
-    std::puts("backend source: decoded fresh IDRs, damage, refinement, idle, shutdown and invalid frames passed");
+    identicalDamageRefines(); invalidSource(1); invalidSource(2); resizeEndsGeneration();
+    std::puts("backend source: decoded fresh IDRs, damage, refinement, idle, shutdown, invalid frames and resize passed");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "backend source: %s\n", error.what()); return 1;

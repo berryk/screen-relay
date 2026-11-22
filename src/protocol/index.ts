@@ -17,7 +17,9 @@ export const SUBPROTOCOL = 'nsl1';
 export const CLOSE_TAKEN = 4001;
 /** Close code for a /control socket refused because input is already owned. */
 export const CLOSE_BUSY = 4003;
-export const MESSAGE_TYPES = { frame: 1, ack: 2, input: 3, controlReady: 4, inputResponse: 5, cursor: 6, clipboard: 7 } as const;
+/** Close code for a /stream whose desktop changed size; reconnect at once to stream the new size. */
+export const CLOSE_RESIZED = 4004;
+export const MESSAGE_TYPES = { frame: 1, ack: 2, input: 3, controlReady: 4, inputResponse: 5, cursor: 6, clipboard: 7, resize: 8 } as const;
 export const INPUT_TYPES = { keyDown: 1, keyUp: 2, pointerMove: 3, buttonDown: 4, buttonUp: 5, wheel: 6, releaseAll: 7, text: 8 } as const;
 
 export type InputEvent = (
@@ -97,7 +99,7 @@ export function batches(groups: InputEvent[][], limit = MAX_INPUT_BATCH): InputE
 }
 
 export function header(type: number, generation: number, sequence: number, size: number): Uint8Array {
-  integer(type, 1, 7, 'message type');
+  integer(type, 1, 8, 'message type');
   integer(generation, 1, 0xffffffff, 'generation');
   integer(sequence, 0, 0xffffffff, 'sequence');
   integer(size, 0, 8388620, 'payload length');
@@ -109,6 +111,15 @@ export function header(type: number, generation: number, sequence: number, size:
   view.setUint32(8, generation);
   view.setUint32(12, sequence);
   view.setUint32(16, size);
+  return bytes;
+}
+
+/** Asks the engine to resize the desktop to width x height (even, 320x240 to 16384x16384). Engines started without --allow-resize ignore it. */
+export function encodeResize(generation: number, width: number, height: number): Uint8Array {
+  const bytes = header(MESSAGE_TYPES.resize, generation, 0, 8);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(HEADER_SIZE, integer(width, 320, 16384, 'width'));
+  view.setUint16(HEADER_SIZE + 2, integer(height, 240, 16384, 'height'));
   return bytes;
 }
 

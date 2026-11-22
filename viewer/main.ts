@@ -1,5 +1,5 @@
 import {
-  CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
+  CLOSE_RESIZED, CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, encodeResize, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
   type InputEvent, type Message,
 } from '../src/protocol/index.js';
 
@@ -484,7 +484,7 @@ function draw(item: any): boolean {
   stats.drawn++;
   const wasReady = ready;
   ready = true;
-  if (!wasReady) renderCursor();
+  if (!wasReady) { renderCursor(); scheduleResize(0); }
   retry = 0;
   setStatus(viewOnly ? 'Live · view only' : 'Live · you have control');
   drawnThisFrame = true;
@@ -666,6 +666,13 @@ function connect() {
     if (access !== 'owner' && e.code === 1008 && e.reason === 'grant ended') {
       reconnectMode = 'grant-ended';
       setStatus('Viewer link expired or was revoked');
+      return;
+    }
+    if (e.code === CLOSE_RESIZED) {
+      // The desktop changed size; the next generation streams it.
+      retry = 0;
+      setStatus('Resizing…');
+      retryTimer = setTimeout(connect, 0);
       return;
     }
     if (e.code === CLOSE_TAKEN) retry = 0;
@@ -949,6 +956,27 @@ function watchDpr() {
   dprQuery?.addEventListener?.('change', watchDpr);
 }
 window.addEventListener('resize', watchDpr);
+// Ask the engine to match the desktop to this window. It applies only with
+// --allow-resize and only for the viewer that has control; it then closes the
+// stream with CLOSE_RESIZED and this viewer reconnects at the new size.
+// Ask once per reason (page load, window resize, taking control), not on every
+// reconnect: if another client resizes the desktop, follow it rather than
+// resizing back, so two clients never ping-pong.
+const stage = document.querySelector('#stage') as HTMLElement;
+let resizeTimer: any, resizeWanted = true;
+function requestResize() {
+  if (!resizeWanted || !ready || viewOnly || access === 'watch' || socket?.readyState !== WebSocket.OPEN) return;
+  const even = (value: number, min: number) => Math.max(min, Math.min(16384, Math.floor(value / 2) * 2));
+  const width = even(stage.clientWidth, 320), height = even(stage.clientHeight, 240);
+  resizeWanted = false;
+  if (width === canvas.width && height === canvas.height) return;
+  try { socket.send(encodeResize(generation, width, height)); } catch {}
+}
+function scheduleResize(delay = 300) {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(requestResize, delay);
+}
+window.addEventListener('resize', () => { resizeWanted = true; scheduleResize(); });
 const metaButton = document.querySelector('#meta-ctrl')!;
 function applyMeta() {
   metaButton.setAttribute('aria-pressed', String(metaAsCtrl));
@@ -994,6 +1022,7 @@ function setViewOnly(next: boolean) {
   release();
   viewOnly = next;
   takeRequested = !next;
+  if (!next) resizeWanted = true;
   applyControl();
   connect();
 }

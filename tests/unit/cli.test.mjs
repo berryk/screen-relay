@@ -356,7 +356,7 @@ test('human help is piped plain text with the command hint', () => {
     assert.doesNotMatch(result.stdout, /Start here \(for AI agents\):/);
   }
   const root = help('0');
-  assert.match(root.stdout, /^screen-relay \d+\.\d+\.\d+\n\n▲ screen-relay \[options\] <command>\n\nFor command help, run `screen-relay <command> --help`\n\nHost commands \(run on the Linux, macOS, or Windows machine that shows the desktop\):\n\n {4}up /);
+  assert.match(root.stdout, /^screen-relay \d+\.\d+\.\d+(?:-[\w.]+)?\n\n▲ screen-relay \[options\] <command>\n\nFor command help, run `screen-relay <command> --help`\n\nHost commands \(run on the Linux, macOS, or Windows machine that shows the desktop\):\n\n {4}up /);
   const click = help('0', ['click', '--help']);
   assert.match(click.stdout, /^click\n\n▲ screen-relay click <x> <y> \[options\]\n\nClick at screen coordinates\nRuns on the host, or on another machine with --url and a token file\.\n\nOptions:\n\n {4}--button <BUTTON> +Select the mouse button\. Values: left, middle, right \[default: left\]\n/);
   assert.match(click.stdout, /– Click the center\n\n {2}\$ screen-relay click 0\.5 0\.5\n\n$/);

@@ -54,6 +54,8 @@ class CaptureSource {
   virtual bool cursorSupported() const { return false; }
   // Called on the source owner thread after draining events, even when video is paused.
   virtual std::optional<CursorImage> cursor(bool /*force*/) { return std::nullopt; }
+  /** True once the desktop's size differs from dimensions(); the owner then replaces the source. Checked after drainDamage(). */
+  virtual bool sizeChanged() const { return false; }
 };
 using CaptureSourceFactory = std::function<std::unique_ptr<CaptureSource>()>;
 }

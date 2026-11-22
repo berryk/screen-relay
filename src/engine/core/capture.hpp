@@ -36,9 +36,11 @@ class CaptureEncoder {
  public:
   using Publish = std::function<bool(EncodedFrame&&)>;
   using PublishCursor = std::function<void(uint32_t, CursorImage&&)>;
+  /** Called on the capture thread after the desktop changed size: the session generation it ended (0 for none) and the new size. */
+  using Resized = std::function<void(uint32_t, int, int)>;
   explicit CaptureEncoder(Publish publish, CaptureSettings settings,
                           CaptureSourceFactory factory,
-                          PublishCursor cursor = {});
+                          PublishCursor cursor = {}, Resized resized = {});
   ~CaptureEncoder();
   CaptureEncoder(const CaptureEncoder&) = delete;
   CaptureEncoder& operator=(const CaptureEncoder&) = delete;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { encodeInputRecord, encodeAck, encodeInput, encodeInputBatch, comboEvents, textEvents, batches, baseUrl, parseHeader, parseMessage, header, RelayError } from '../../dist/protocol/index.js';
+import { encodeInputRecord, encodeAck, encodeResize, encodeInput, encodeInputBatch, comboEvents, textEvents, batches, baseUrl, parseHeader, parseMessage, header, RelayError } from '../../dist/protocol/index.js';
 const hex = bytes => Buffer.from(bytes).toString('hex');
 
 test('input records and WebSocket envelope match golden bytes', () => {
@@ -113,4 +113,12 @@ test('a clipboard notice is an empty type 7 message', () => {
   assert.throws(() => parseMessage(header(7, 3, 1, 0)), { reason: 'protocol_error' });
   assert.throws(() => parseMessage(header(7, 3, 0, 1)), { reason: 'protocol_error' });
   assert.throws(() => parseMessage(header(7, 3, 0, 0).map((byte, index) => index === 5 ? 8 : byte)), { reason: 'protocol_error' });
+});
+
+test('resize requests match golden bytes and reject sizes the engine refuses', () => {
+  // NSL1, version 1, type 8, flags 0, generation 7, sequence 0, payload 8: width 1600, height 900, 4 reserved bytes.
+  assert.equal(hex(encodeResize(7, 1600, 900)), '4e534c310108000000000007000000000000000806400384' + '00000000');
+  assert.throws(() => encodeResize(7, 318, 900), RelayError);
+  assert.throws(() => encodeResize(7, 1600, 238), RelayError);
+  assert.throws(() => encodeResize(7, 16386, 900), RelayError);
 });

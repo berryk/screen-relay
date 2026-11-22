@@ -10,6 +10,7 @@ x11	libxext-dev	libxext-dev	libXext-devel	libxext	libxext-dev
 x11	libxdamage-dev	libxdamage-dev	libXdamage-devel	libxdamage	libxdamage-dev
 x11	libxfixes-dev	libxfixes-dev	libXfixes-devel	libxfixes	libxfixes-dev
 x11	libxtst-dev	libxtst-dev	libXtst-devel	libxtst	libxtst-dev
+x11	libxrandr-dev	libxrandr-dev	libXrandr-devel	libxrandr	libxrandr-dev
 x11	Xvfb	xvfb	xorg-x11-server-Xvfb	xorg-server-xvfb	xvfb
 x11	xauth	xauth	xorg-x11-xauth	xorg-xauth	xauth
 x11	xprop	x11-utils	xprop	xorg-xprop	xprop

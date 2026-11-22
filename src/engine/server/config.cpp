@@ -294,7 +294,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
     const std::string option = argv[i];
     if (option == "--help") {
       std::cout << "Usage: relay-engine [--bind ADDRESS] [--port PORT] [--viewer-dir DIR]\n"
-                   "  [--backend NAME] [--output NAME] [--check]\n"
+                   "  [--backend NAME] [--output NAME] [--check] [--allow-resize]\n"
                    "  [--fps N] [--bitrate-min BPS] [--bitrate-start BPS] [--bitrate-max BPS]\n"
                    "  [--token-file FILE [--public-origin https://HOST[:PORT]]\n"
                    "    [--allow-origin ORIGIN[,...]]]\n"
@@ -308,6 +308,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
                    "origin is a lowercase https://HOST[:PORT] origin, or http://localhost[:PORT] or\n"
                    "http://127.0.0.1[:PORT] for a page served on the machine itself.\n"
                    "--check initializes the backend and exits without starting capture or the server.\n"
+                   "--allow-resize lets the viewer that owns input resize the desktop to its window (X11).\n"
                    "Attach to DISPLAY using the caller's XAUTHORITY. Defaults: 127.0.0.1:8080, 60 fps,\n"
                    "1000000/8000000/40000000 bps.\n"
                 << "Compiled backends: " << backendNames() << '\n';
@@ -316,6 +317,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
     if (option == "--behind-tls-proxy") { config.proxy = true; continue; }
     if (option == "--insecure-local") { config.insecure_local = true; continue; }
     if (option == "--check") { config.check = true; continue; }
+    if (option == "--allow-resize") { config.allow_resize = true; continue; }
     if (++i == argc) throw std::runtime_error("Missing value for " + option);
     const std::string value = argv[i];
     if (option == "--bind") config.bind = value;

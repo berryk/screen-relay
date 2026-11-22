@@ -77,6 +77,10 @@ backendFor(server.config.backend).capture, [this, &server](uint32_t gen, CursorI
   if (!generation || gen != generation) return;
   pending_cursor = std::move(cursor);
   lws_cancel_service(server.context);
+}, [this, &server](uint32_t gen, int w, int h) {
+  server.desktop_size = (uint32_t(w) << 16) | uint32_t(h);
+  { std::lock_guard<std::mutex> lock(mutex); if (gen && gen == generation) resized = true; }
+  lws_cancel_service(server.context);
 }) {
   const auto& cfg = server.config;
   flow.configure(cfg.bitrate_min, cfg.bitrate_start, cfg.bitrate_max, cfg.fps);
@@ -91,7 +95,7 @@ void Server::Stream::begin(lws* wsi, uint32_t gen) {
 }
 void Server::Stream::end() {
   uint32_t old;
-  { std::lock_guard<std::mutex> lock(mutex); old = generation; generation = 0; pending.clear(); pending_cursor.reset(); flow.reset(); failed = false; }
+  { std::lock_guard<std::mutex> lock(mutex); old = generation; generation = 0; pending.clear(); pending_cursor.reset(); flow.reset(); failed = false; resized = false; }
   last_write_cursor = false;
   buffered_stream_bytes = 0; stream_notsent_lowat = 0; flow_timer_due_us = 0;
   if (old) capture.endSession(old);
@@ -141,6 +145,7 @@ int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, boo
   if (plan.closeControl) { evict(control); endControl(); }
   if (socket != Socket::watch) { input_viewer = wsi; input->resetLocks(); }
   auto& stream = **slot;
+  applyDesktopSize();
   stream.width = width; stream.height = height;
   stream.clipboard_notices = clipboardNotices;
   stream.begin(wsi, ++nextGeneration);
@@ -148,6 +153,9 @@ int Server::startStream(lws* wsi, Socket socket, const ConnectionPlan& plan, boo
   return 0;
 }
 void Server::release() { if (input) input->releaseAll(); }
+void Server::applyDesktopSize() {
+  if (const uint32_t size = desktop_size.load()) { width = uint16_t(size >> 16); height = uint16_t(size & 0xffff); }
+}
 void Server::endStream(lws* wsi) {
   for (auto slot = streams.begin(); slot != streams.end(); ++slot) {
     if (!*slot || (*slot)->viewer != wsi) continue;
@@ -213,6 +221,21 @@ bool Server::streamMessage(Stream& stream) {
       if (gen == stream.generation && seq) accepted = stream.flow.ack(seq, nowUs(), wait);
     }
     if (accepted) { stream.capture.acknowledge(gen, seq); stream.updateFlow(config.proxy); }
+    return true;
+  }
+  if (b[5] == 8) {
+    // Resize request: width and height, 2 bytes each, then 4 reserved bytes. Only the
+    // viewer that owns input may resize, and only when the engine allows it.
+    if (b.size() != 28 || seq || gen != stream.generation) return false;
+    const auto& backend = backendFor(config.backend);
+    if (!config.allow_resize || !backend.resize || input_viewer != stream.viewer) return true;
+    const int w = u16(b.data()+20), h = u16(b.data()+22);
+    if (w < min_frame_width || w > max_frame_width || h < min_frame_height || h > max_frame_height || (w & 1) || (h & 1))
+      return true;
+    applyDesktopSize();
+    if (w == width && h == height) return true;
+    std::string error;
+    if (!backend.resize(w, h, error)) std::cerr << "Resize to " << w << 'x' << h << " failed: " << error << '\n';
     return true;
   }
   if (b[5] != 3 || b.size() != 36 || seq || gen != stream.generation) return false;
@@ -351,6 +374,12 @@ int Server::Stream::write(bool proxy) {
   const bool send_notice = lastSequence && clipboard_pending;
   { std::lock_guard<std::mutex> lock(mutex);
     if (failed) return -1;
+    if (resized) {
+      static const char reason[] = "resized";
+      lws_close_reason(wsi, static_cast<lws_close_status>(close_resized),
+                       reinterpret_cast<unsigned char*>(const_cast<char*>(reason)), sizeof(reason) - 1);
+      return -1;
+    }
     if (!send_notice) {
       // Start with video to establish the generation; then share writes fairly.
       if (lastSequence && pending_cursor && (!last_write_cursor || pending.empty())) {
@@ -755,6 +784,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
       return s->control == wsi ? s->writeControl(wsi) : -1;
     }
     case LWS_CALLBACK_EVENT_WAIT_CANCELLED: {
+      s->applyDesktopSize();
       if (s->clipboard_changed.exchange(false) && s->input_viewer) {
         if (auto* stream = s->streamFor(s->input_viewer); stream && stream->clipboard_notices) {
           stream->clipboard_pending = true;

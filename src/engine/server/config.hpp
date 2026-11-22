@@ -13,7 +13,7 @@ struct Config {
   unsigned port = 8080;
   unsigned fps = 60;
   uint64_t bitrate_min = 1000000, bitrate_start = 8000000, bitrate_max = 40000000;
-  bool proxy = false, insecure_local = false, check = false;
+  bool proxy = false, insecure_local = false, check = false, allow_resize = false;
   std::vector<std::string> allowed_origins;
 };
 bool unsignedNumber(const std::string& text, uint64_t& value);

@@ -66,6 +66,8 @@ struct Server {
     uint32_t generation = 0, lastSequence = 0;
     uint16_t width = 0, height = 0;
     bool failed = false;
+    /// The desktop changed size during this generation; close with close_resized so the viewer reconnects.
+    bool resized = false;
     std::vector<uint8_t> received;
     CaptureEncoder capture;
     explicit Stream(Server& server);
@@ -98,6 +100,9 @@ struct Server {
   std::unique_ptr<InputController> input;
   uint32_t nextGeneration = 0;
   uint16_t width = 0, height = 0;
+  /// The latest desktop size a capture thread saw after a resize, as width << 16 | height; 0 until one happens.
+  std::atomic<uint32_t> desktop_size{0};
+  void applyDesktopSize();
   explicit Server(Config settings);
   Stream* streamFor(lws* wsi);
   ConnectionPlan planConnection(Socket socket, bool grant);

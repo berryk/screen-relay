@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "core/input.hpp"
 #include "backends/linux/keycodes.hpp"
 #include <X11/Xlib.h>
@@ -70,7 +71,13 @@ class X11Input final : public InputBackend {
     if (worker.joinable()) worker.join();
     XCloseDisplay(display);
   }
-  std::pair<uint16_t, uint16_t> dimensions() const override { return {width, height}; }
+  // Read live: the desktop can be resized under a running session (RandR, --allow-resize).
+  std::pair<uint16_t, uint16_t> dimensions() const override {
+    Window root_return; int x, y; unsigned w = 0, h = 0, border, depth;
+    if (XGetGeometry(display, DefaultRootWindow(display), &root_return, &x, &y, &w, &h, &border, &depth) && w && h)
+      return {uint16_t(std::min(w, 65535u)), uint16_t(std::min(h, 65535u))};
+    return {width, height};
+  }
   const char* name() const override { return "x11"; }
   std::optional<NativeKey> nativeKey(uint16_t usage) const override {
     const int keycode = hidKeycode(usage);

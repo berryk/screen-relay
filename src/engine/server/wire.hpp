@@ -38,6 +38,8 @@ struct ConnectionPlan {
 constexpr size_t max_viewers = 4;
 constexpr uint16_t close_taken = 4001;
 constexpr uint16_t close_busy = 4003;
+/// Close code for a /stream whose desktop changed size; the viewer reconnects at once.
+constexpr uint16_t close_resized = 4004;
 /// Plans a connection without changing the current input owner or any active stream.
 ConnectionPlan connectionPlan(Socket socket, size_t viewerCount, bool streamOwnsInput, bool controlOpen,
                               size_t grantViewerCount, bool grant, bool inputViewerHasGrant);

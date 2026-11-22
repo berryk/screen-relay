@@ -222,12 +222,14 @@ struct Resources {
 }  // namespace
 
 struct CaptureEncoder::Impl {
-  explicit Impl(Publish callback, CaptureSettings options, CaptureSourceFactory factory, PublishCursor cursor)
+  explicit Impl(Publish callback, CaptureSettings options, CaptureSourceFactory factory, PublishCursor cursor,
+                Resized on_resize)
       : source_factory(std::move(factory)), publish(std::move(callback)), publish_cursor(std::move(cursor)),
-        settings(options) {}
+        resized(std::move(on_resize)), settings(options) {}
   CaptureSourceFactory source_factory;
   Publish publish;
   PublishCursor publish_cursor;
+  Resized resized;
   CaptureSettings settings;
   mutable std::mutex mutex;
   std::condition_variable ready;
@@ -252,10 +254,10 @@ struct CaptureEncoder::Impl {
       const auto format = source->pixelFormat();
       require(format == PixelFormat::BGRA || format == PixelFormat::ARGB, "unsupported capture pixel format");
       const auto dimensions = source->dimensions();
-      const int width = dimensions.first, height = dimensions.second;
+      int width = dimensions.first, height = dimensions.second;
       requireSurfaceSize(width, height);
-      Resources r(format, width, height, settings);
-      r.init();
+      auto r = std::make_unique<Resources>(format, width, height, settings);
+      r->init();
       { std::lock_guard<std::mutex> lock(mutex);
         counters.cursor_supported = source->cursorSupported(); initialized = true; running = true;
       }
@@ -281,8 +283,51 @@ struct CaptureEncoder::Impl {
         cascade_frames = 0;
         first_refinement_size = 0;
       };
+      unsigned rebuild_failures = 0;
       while (true) {
         if (source->drainDamage()) dirty = true;
+        if (source->sizeChanged()) {
+          // The desktop was resized: capture and encode at the new size from a fresh
+          // source and encoder. Frames carry their size, but a viewer only configures
+          // its decoder when a generation starts, so end the current one; the server
+          // closes that stream and the viewer reconnects at the new size.
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopping) break;
+          }
+          std::unique_ptr<CaptureSource> next;
+          try {
+            next = source_factory();
+            require(bool(next) && validWaitHandle(next->fd()), "invalid capture source after resize");
+            require(next->pixelFormat() == format, "capture pixel format changed after resize");
+            requireSurfaceSize(next->dimensions().first, next->dimensions().second);
+          } catch (const std::exception& error) {
+            // A RandR change can pass through an intermediate size; retry briefly.
+            if (++rebuild_failures >= 40) throw;
+            std::fprintf(stderr, "capture: resize not ready (%s); retrying\n", error.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            continue;
+          }
+          rebuild_failures = 0;
+          consecutive_failures = 0;
+          retry_after = Clock::time_point::min();
+          r.reset();
+          source = std::move(next);
+          width = source->dimensions().first; height = source->dimensions().second;
+          r = std::make_unique<Resources>(format, width, height, settings);
+          r->init();
+          dirty = true; force_idr = true; last_was_refinement = true;
+          reset_refinement();
+          uint32_t ended = 0;
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            ended = active ? generation : 0;
+            active = false;
+          }
+          std::fprintf(stderr, "capture: desktop resized to %dx%d\n", width, height);
+          if (resized) resized(ended, width, height);
+          continue;
+        }
         uint32_t gen, seq;
         uint64_t rev, rate;
         bool admitted, cursor_active, queue_empty, refresh_cursor = false;
@@ -333,16 +378,16 @@ struct CaptureEncoder::Impl {
                       view.stride >= view.width * 4 && view.stride <= width * 8 &&
                       !(view.x & 1) && !(view.y & 1) && !(view.width & 1) && !(view.height & 1) &&
                       !(force_idr && (view.width != width || view.height != height)) &&
-                      view.format == r.format, "invalid capture frame");
+                      view.format == r->format, "invalid capture frame");
               bool changed = true;
               if (force_idr) {
                 const auto convert = view.format == PixelFormat::BGRA ? bgraToNv12 : argbToNv12;
-                require(convert(view.data, view.stride, r.frame.img.plane[0], r.frame.img.i_stride[0],
-                                r.frame.img.plane[1], r.frame.img.i_stride[1], view.width, view.height),
+                require(convert(view.data, view.stride, r->frame.img.plane[0], r->frame.img.i_stride[0],
+                                r->frame.img.plane[1], r->frame.img.i_stride[1], view.width, view.height),
                         "RGB conversion failed");
               } else {
                 if (!source->changedRects(rects)) rects = {{view.x, view.y, view.width, view.height}};
-                changed = r.convertDamage(view, rects);
+                changed = r->convertDamage(view, rects);
               }
               converted = Clock::now();
               if (!changed) {
@@ -361,24 +406,24 @@ struct CaptureEncoder::Impl {
               }
             }
             const int64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(capture_start.time_since_epoch()).count();
-            r.frame.i_pts = last_pts = std::max(last_pts + 1, timestamp);
+            r->frame.i_pts = last_pts = std::max(last_pts + 1, timestamp);
             const bool wide_vbv = refinement || force_idr;
-            if (rate != r.bitrate || wide_vbv != r.wide_vbv) {
+            if (rate != r->bitrate || wide_vbv != r->wide_vbv) {
               x264_param_t params;
-              x264_encoder_parameters(r.codec, &params);
+              x264_encoder_parameters(r->codec, &params);
               params.rc.i_vbv_max_bitrate = int(rate / 1000);
               params.rc.i_vbv_buffer_size = vbvBufferKbit(rate, settings.fps, wide_vbv);
-              require(x264_encoder_reconfig(r.codec, &params) == 0, "encoder reconfiguration failed");
-              r.bitrate = rate;
-              r.wide_vbv = wide_vbv;
+              require(x264_encoder_reconfig(r->codec, &params) == 0, "encoder reconfiguration failed");
+              r->bitrate = rate;
+              r->wide_vbv = wide_vbv;
             }
-            r.frame.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
-            r.frame.prop.mb_info = nullptr; r.frame.prop.mb_info_free = nullptr;
-            if (!refinement && !force_idr) r.frame.prop.mb_info = r.mb_info.data();
+            r->frame.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
+            r->frame.prop.mb_info = nullptr; r->frame.prop.mb_info_free = nullptr;
+            if (!refinement && !force_idr) r->frame.prop.mb_info = r->mb_info.data();
             x264_nal_t* nals = nullptr;
             int nal_count = 0;
             x264_picture_t picture;
-            const int size = x264_encoder_encode(r.codec, &nals, &nal_count, &r.frame, &picture);
+            const int size = x264_encoder_encode(r->codec, &nals, &nal_count, &r->frame, &picture);
             require(size > 0 && nal_count > 0 && nals && picture.i_pts == last_pts &&
                     static_cast<size_t>(size) <= FlowControl::max_bytes,
                     "invalid or delayed encoded access unit");
@@ -441,7 +486,7 @@ struct CaptureEncoder::Impl {
             if (++consecutive_failures >= 3) {
               throw std::runtime_error(std::string("capture failed three consecutive times: ") + error.what());
             }
-            r.openEncoder();
+            r->openEncoder();
             retry_after = Clock::now() + std::chrono::seconds(1);
           }
           continue;
@@ -478,8 +523,10 @@ struct CaptureEncoder::Impl {
   }
 };
 
-CaptureEncoder::CaptureEncoder(Publish publish, CaptureSettings settings, CaptureSourceFactory factory, PublishCursor cursor)
-    : impl_(std::make_unique<Impl>(std::move(publish), settings, std::move(factory), std::move(cursor))) {}
+CaptureEncoder::CaptureEncoder(Publish publish, CaptureSettings settings, CaptureSourceFactory factory, PublishCursor cursor,
+                               Resized resized)
+    : impl_(std::make_unique<Impl>(std::move(publish), settings, std::move(factory), std::move(cursor),
+                                   std::move(resized))) {}
 CaptureEncoder::~CaptureEncoder() { stop(); }
 bool CaptureEncoder::start(std::string& error) {
   auto& i = *impl_;

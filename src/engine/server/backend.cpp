@@ -8,6 +8,7 @@ bool initializeNativeBackend(const std::string& output);
 std::unique_ptr<CaptureSource> makeCaptureSource();
 std::unique_ptr<InputBackend> makeInputBackend();
 std::unique_ptr<ClipboardBackend> makeClipboard(ClipboardChanged changed);
+bool resizeDesktop(int width, int height, std::string& error);
 }
 #endif
 #ifdef RELAY_BACKEND_wayland
@@ -38,7 +39,7 @@ std::unique_ptr<ClipboardBackend> makeClipboard(ClipboardChanged changed);
 namespace {
 const Backend backends[] = {
 #ifdef RELAY_BACKEND_x11
-  {"x11", x11::initializeNativeBackend, x11::makeCaptureSource, x11::makeInputBackend, x11::makeClipboard},
+  {"x11", x11::initializeNativeBackend, x11::makeCaptureSource, x11::makeInputBackend, x11::makeClipboard, x11::resizeDesktop},
 #endif
 #ifdef RELAY_BACKEND_wayland
   {"wayland", wayland::initializeNativeBackend, wayland::makeCaptureSource, wayland::makeInputBackend, wayland::makeClipboard},

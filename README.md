@@ -1,5 +1,13 @@
 # screen-relay
 
+> **Fork note (berryk/screen-relay, branch `live-resize`).** Adds live desktop resizing
+> on X11: start with `SCREEN_RELAY_ALLOW_RESIZE=1 screen-relay up ...` (engine flag
+> `--allow-resize`) and the viewer that has control resizes the desktop to its
+> window over RandR, on load, on window resize and on taking control. Any resize,
+> requested or not, restarts each stream at the new size (close code 4004), and X
+> errors no longer exit the engine. Works with Xvnc (TigerVNC, KasmVNC) displays
+> attached with `--display`. See `PROTOCOL.md` (message type 8).
+
 Desktop streaming and control for humans and AI agents: watch a desktop in a browser, and click, type, and take screenshots from the shell.
 
 <p>
