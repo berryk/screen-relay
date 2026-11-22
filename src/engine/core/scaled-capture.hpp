@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,102 +47,85 @@ class ScaledCaptureSource final : public CaptureSource {
     out.xhot = uint16_t(std::min<int>(scaled_w - 1, int(int64_t(raw->xhot) * scaled_w / raw->width)));
     out.yhot = uint16_t(std::min<int>(scaled_h - 1, int(int64_t(raw->yhot) * scaled_h / raw->height)));
     out.rgba.resize(size_t(scaled_w) * size_t(scaled_h) * 4u);
-    scaleRgbaFrame(raw->rgba.data(), int(raw->width) * 4, int(raw->width), int(raw->height),
-                   out.rgba.data(), int(scaled_w) * 4, int(scaled_w), int(scaled_h));
+    scaleStraightAlphaRgba(raw->rgba.data(), int(raw->width), int(raw->height),
+                           out.rgba.data(), int(scaled_w), int(scaled_h));
     return out;
   }
 
   FrameView capture() override {
     const FrameView view = inner_->capture();
     validateSourceView(view, true);
-    have_source_shadow_ = false;
-    scaleRgbaRect(view.data, view.stride, table_, dst_buffer_.data(), dst_width_ * 4, {0, 0, dst_width_, dst_height_});
-    last_rects_.clear();
-    last_rects_valid_ = false;
-    return {dst_buffer_.data(), dst_width_ * 4, dst_width_, dst_height_, format_, 0, 0};
+    if (state_ == SourceState::shadowed) state_ = SourceState::direct;
+    scaleInto(view.data, view.stride, {0, 0, dst_width_, dst_height_});
+    report_.reset();
+    return streamView();
   }
 
   FrameView captureChanged(bool full) override {
-    const FrameView view = inner_->captureChanged(full || !have_initial_frame_);
-    const bool full_view = view.x == 0 && view.y == 0 && view.width == src_width_ && view.height == src_height_;
-    validateSourceView(view, full || !have_initial_frame_);
-    last_rects_.clear();
-    last_rects_valid_ = false;
-
+    const bool need_full = full || state_ == SourceState::awaiting_full;
+    const FrameView view = inner_->captureChanged(need_full);
+    validateSourceView(view, need_full);
+    report_.reset();
     std::vector<DamageRect> src_rects;
-    const bool have_initial_rects = !full && have_initial_frame_ && inner_->changedRects(src_rects);
+    const bool known = !need_full && inner_->changedRects(src_rects);
+    const bool full_view = view.x == 0 && view.y == 0 && view.width == src_width_ && view.height == src_height_;
 
-    const uint8_t* scale_src = view.data;
-    int scale_stride = view.stride;
-    bool bootstrapped_shadow = false;
-    if (!full_view) {
-      if (!have_source_shadow_) {
-        if (!have_initial_rects || src_rects.empty()) {
-          src_rects.push_back({view.x, view.y, view.width, view.height});
-        }
-        const FrameView full_frame = inner_->capture();
-        validateSourceView(full_frame, true);
-        copyToShadow(full_frame);
-        std::vector<DamageRect> extra_rects;
-        if (inner_->changedRects(extra_rects)) {
-          src_rects.insert(src_rects.end(), extra_rects.begin(), extra_rects.end());
-        }
-        bootstrapped_shadow = true;
-      } else {
-        copySubRectToShadow(view);
+    if (full_view) {
+      if (state_ == SourceState::shadowed) copyToShadow(view);
+      if (state_ == SourceState::awaiting_full) state_ = SourceState::direct;
+      if (!known) {
+        scaleInto(view.data, view.stride, {0, 0, dst_width_, dst_height_});
+        return streamView();
       }
-      scale_src = src_shadow_.data();
-      scale_stride = src_width_ * 4;
-    } else if (have_source_shadow_) {
-      copyToShadow(view);
+      report_ = mapToStream(src_rects);
+      for (const auto& rect : *report_) scaleInto(view.data, view.stride, rect);
+      return streamView();
     }
 
-    if (full || !have_initial_frame_) {
-      scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4,
-                    {0, 0, dst_width_, dst_height_});
-      have_initial_frame_ = true;
-      return {dst_buffer_.data(), dst_width_ * 4, dst_width_, dst_height_, format_, 0, 0};
+    if (!known || src_rects.empty()) src_rects = {{view.x, view.y, view.width, view.height}};
+    if (state_ == SourceState::shadowed) {
+      copySubRectToShadow(view);
+      report_ = mapToStream(src_rects);
+      for (const auto& rect : *report_) scaleInto(src_shadow_.data(), src_width_ * 4, rect);
+      return streamView();
     }
 
-    if (bootstrapped_shadow) {
-      scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4,
-                    {0, 0, dst_width_, dst_height_});
-      for (const auto& rect : src_rects) {
-        const DamageRect mapped = mapDamageRect(rect, src_width_, src_height_, dst_width_, dst_height_);
-        if (mapped.width > 0 && mapped.height > 0) last_rects_.push_back(mapped);
-      }
-      last_rects_valid_ = !last_rects_.empty();
-    } else if (have_initial_rects && !src_rects.empty()) {
-      for (const auto& rect : src_rects) {
-        const DamageRect mapped = mapDamageRect(rect, src_width_, src_height_, dst_width_, dst_height_);
-        if (mapped.width > 0 && mapped.height > 0) {
-          scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4, mapped);
-          last_rects_.push_back(mapped);
-        }
-      }
-      last_rects_valid_ = !last_rects_.empty();
-    } else if (!full_view) {
-      const DamageRect mapped = mapDamageRect({view.x, view.y, view.width, view.height},
-                                              src_width_, src_height_, dst_width_, dst_height_);
-      if (mapped.width > 0 && mapped.height > 0) {
-        scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4, mapped);
-        last_rects_.push_back(mapped);
-        last_rects_valid_ = true;
-      }
-    } else {
-      scaleRgbaRect(scale_src, scale_stride, table_, dst_buffer_.data(), dst_width_ * 4,
-                    {0, 0, dst_width_, dst_height_});
-    }
-    return {dst_buffer_.data(), dst_width_ * 4, dst_width_, dst_height_, format_, 0, 0};
+    const FrameView full_frame = inner_->capture();
+    validateSourceView(full_frame, true);
+    copyToShadow(full_frame);
+    state_ = SourceState::shadowed;
+    std::vector<DamageRect> extra_rects;
+    if (inner_->changedRects(extra_rects)) src_rects.insert(src_rects.end(), extra_rects.begin(), extra_rects.end());
+    scaleInto(src_shadow_.data(), src_width_ * 4, {0, 0, dst_width_, dst_height_});
+    report_ = mapToStream(src_rects);
+    return streamView();
   }
 
   bool changedRects(std::vector<DamageRect>& out) override {
-    if (!last_rects_valid_) return false;
-    out = last_rects_;
+    if (!report_) return false;
+    out = *report_;
     return true;
   }
 
  private:
+  /** Source pixels the scaler reads: none yet (next capture must be full), full views direct from the source, or a full-resolution shadow kept current from partial views. */
+  enum class SourceState : uint8_t { awaiting_full, direct, shadowed };
+
+  FrameView streamView() const { return {dst_buffer_.data(), dst_width_ * 4, dst_width_, dst_height_, format_, 0, 0}; }
+
+  void scaleInto(const uint8_t* src, int src_stride, const DamageRect& rect) {
+    scaleRgbaRect(src, src_stride, table_, dst_buffer_.data(), dst_width_ * 4, rect);
+  }
+
+  std::vector<DamageRect> mapToStream(const std::vector<DamageRect>& rects) const {
+    std::vector<DamageRect> mapped;
+    for (const auto& rect : rects) {
+      const DamageRect m = mapDamageRect(rect, src_width_, src_height_, dst_width_, dst_height_);
+      if (m.width > 0 && m.height > 0) mapped.push_back(m);
+    }
+    return mapped;
+  }
+
   void validateSourceView(const FrameView& view, bool require_full) const {
     if (!view.data || view.width <= 0 || view.height <= 0 ||
         view.x < 0 || view.y < 0 || view.x > src_width_ || view.y > src_height_ ||
@@ -159,7 +143,6 @@ class ScaledCaptureSource final : public CaptureSource {
       std::memcpy(src_shadow_.data() + size_t(y) * size_t(src_width_) * 4u,
                   view.data + size_t(y) * size_t(view.stride), size_t(src_width_) * 4u);
     }
-    have_source_shadow_ = true;
   }
 
   void copySubRectToShadow(const FrameView& view) {
@@ -178,10 +161,8 @@ class ScaledCaptureSource final : public CaptureSource {
   RgbaScaleTable table_;
   std::vector<uint8_t> dst_buffer_;
   std::vector<uint8_t> src_shadow_;
-  bool have_source_shadow_ = false;
-  bool have_initial_frame_ = false;
-  std::vector<DamageRect> last_rects_;
-  bool last_rects_valid_ = false;
+  SourceState state_ = SourceState::awaiting_full;
+  std::optional<std::vector<DamageRect>> report_;
 };
 
 /** Wraps source with ScaledCaptureSource only when its dimensions exceed the H.264 Level 5.2 budget for fps. */

@@ -89,6 +89,32 @@ inline void scaleRgbaFrame(const uint8_t* src, int src_stride, int src_w, int sr
   scaleRgbaRect(src, src_stride, table, dst, dst_stride, {0, 0, dst_w, dst_h});
 }
 
+/** Area-averages a tightly packed straight-alpha RGBA image, weighting color by alpha so transparent pixels do not darken edges. */
+inline void scaleStraightAlphaRgba(const uint8_t* src, int src_w, int src_h, uint8_t* dst, int dst_w, int dst_h) {
+  RgbaScaleTable table;
+  table.build(src_w, src_h, dst_w, dst_h);
+  for (int dy = 0; dy < dst_h; ++dy) {
+    for (int dx = 0; dx < dst_w; ++dx) {
+      uint32_t c0 = 0, c1 = 0, c2 = 0, alpha = 0, count = 0;
+      for (int sy = table.y0[size_t(dy)]; sy < table.y1[size_t(dy)]; ++sy) {
+        const uint8_t* in = src + (size_t(sy) * size_t(src_w) + size_t(table.x0[size_t(dx)])) * 4u;
+        for (int sx = table.x0[size_t(dx)]; sx < table.x1[size_t(dx)]; ++sx, in += 4) {
+          c0 += uint32_t(in[0]) * in[3];
+          c1 += uint32_t(in[1]) * in[3];
+          c2 += uint32_t(in[2]) * in[3];
+          alpha += in[3];
+          ++count;
+        }
+      }
+      uint8_t* out = dst + (size_t(dy) * size_t(dst_w) + size_t(dx)) * 4u;
+      out[0] = alpha ? uint8_t((c0 + alpha / 2u) / alpha) : 0;
+      out[1] = alpha ? uint8_t((c1 + alpha / 2u) / alpha) : 0;
+      out[2] = alpha ? uint8_t((c2 + alpha / 2u) / alpha) : 0;
+      out[3] = uint8_t((alpha + count / 2u) / count);
+    }
+  }
+}
+
 /** Maps a source-space damage rectangle into an even-aligned destination rectangle covering all affected pixels. */
 inline DamageRect mapDamageRect(const DamageRect& src_rect, int src_w, int src_h, int dst_w, int dst_h) {
   const int sx0 = std::clamp(src_rect.x, 0, src_w);

@@ -57,7 +57,8 @@ class SyntheticSource final : public relay::CaptureSource {
     cur.height = 32;
     cur.xhot = 8;
     cur.yhot = 12;
-    cur.rgba.assign(32u * 32u * 4u, 200);
+    cur.rgba.assign(32u * 32u * 4u, 0);
+    for (size_t i = 0; i < cur.rgba.size(); i += 8) std::memset(&cur.rgba[i], 255, 4);
     return cur;
   }
 
@@ -86,7 +87,13 @@ class SyntheticSource final : public relay::CaptureSource {
     return {sub_pixels_.data(), sub_rect_.width * 4, sub_rect_.width, sub_rect_.height, format_, sub_rect_.x, sub_rect_.y};
   }
 
+  void reportNoDamage() { no_damage_ = true; }
+
   bool changedRects(std::vector<relay::DamageRect>& out) override {
+    if (no_damage_) {
+      out.clear();
+      return true;
+    }
     if (!has_sub_rect_) return false;
     out = {sub_rect_};
     return true;
@@ -101,6 +108,7 @@ class SyntheticSource final : public relay::CaptureSource {
   bool has_sub_rect_ = false;
   relay::DamageRect override_damage_{};
   bool has_override_damage_ = false;
+  bool no_damage_ = false;
 };
 }  // namespace
 
@@ -213,6 +221,18 @@ int main() {
     const auto cur = fitted->cursor(true);
     require(cur && cur->width < 32 && cur->height < 32 && cur->xhot < cur->width && cur->yhot < cur->height,
             "scaled cursor dimensions/hotspot mismatch");
+    require(cur->rgba[0] == 255 && cur->rgba[1] == 255 && cur->rgba[2] == 255,
+            "scaled cursor must not darken straight-alpha edges");
+  }
+  {
+    auto raw = std::make_unique<SyntheticSource>(5120, 2880);
+    auto* raw_ptr = raw.get();
+    auto fitted = fitCaptureSourceToBudget(std::move(raw), 60);
+    fitted->captureChanged(true);
+    raw_ptr->reportNoDamage();
+    fitted->captureChanged(false);
+    std::vector<DamageRect> rects;
+    require(fitted->changedRects(rects) && rects.empty(), "empty source damage must report no stream damage");
   }
 
   std::puts("surface budget and scaler checks passed");
