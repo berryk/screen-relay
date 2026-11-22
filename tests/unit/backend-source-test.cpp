@@ -289,14 +289,14 @@ class ResizableSource final : public relay::CaptureSource {
     return {pixels.data(), width * 4, width, height, relay::PixelFormat::BGRA};
   }
 };
-static void resizeEndsGeneration() {
+static void resizeContinuesGeneration() {
   auto state = std::make_shared<ResizeState>(); Frames frames;
   std::mutex mutex; std::condition_variable changed;
-  std::vector<std::tuple<uint32_t, int, int>> resizes;
+  std::vector<std::pair<int, int>> resizes;
   relay::CaptureEncoder encoder([&](relay::EncodedFrame&& f) { return frames.publish(std::move(f)); },
       capture_settings, [state] { return std::make_unique<ResizableSource>(state); }, {},
-      [&](uint32_t gen, int w, int h) {
-        { std::lock_guard<std::mutex> lock(mutex); resizes.emplace_back(gen, w, h); }
+      [&](int w, int h) {
+        { std::lock_guard<std::mutex> lock(mutex); resizes.emplace_back(w, h); }
         changed.notify_all();
       });
   std::string error; require(encoder.start(error), error.c_str());
@@ -308,27 +308,26 @@ static void resizeEndsGeneration() {
   {
     std::unique_lock<std::mutex> lock(mutex);
     require(changed.wait_for(lock, 3s, [&] { return !resizes.empty(); }), "resize was not reported");
-    require(resizes.front() == std::make_tuple(30u, 1600, 900), "resize reported the wrong generation or size");
+    require(resizes.front() == std::make_pair(1600, 900), "resize reported the wrong size");
   }
-  std::this_thread::sleep_for(100ms);
-  { std::lock_guard<std::mutex> lock(frames.mutex);
-    require(frames.items.size() == 1, "the ended generation received a frame after the resize"); }
-  encoder.endSession(30); encoder.beginSession(31);
-  const auto fresh = frames.at(1);
-  require(fresh.generation == 31 && fresh.sequence == 1 && fresh.keyframe && fresh.width == 1600 && fresh.height == 900,
-          "the next generation did not start with a keyframe at the new size");
-  decodedPixel(fresh, true, 1600, 900);
-  // Resizing with no session ends no generation, and the next one uses the new size.
-  encoder.endSession(31);
+  // The same generation continues with a keyframe at the new size.
+  const auto resized = frames.at(1);
+  require(resized.generation == 30 && resized.sequence == 2 && resized.keyframe &&
+          resized.width == 1600 && resized.height == 900,
+          "the session did not continue with a keyframe at the new size");
+  decodedPixel(resized, true, 1600, 900);
+  encoder.acknowledge(30, 2);
+  // Resizing with no session is reported too, and the next session uses the new size.
+  encoder.endSession(30);
   state->width = 1024; state->height = 768; state->damage();
   {
     std::unique_lock<std::mutex> lock(mutex);
     require(changed.wait_for(lock, 3s, [&] { return resizes.size() == 2; }), "idle resize was not reported");
-    require(resizes.back() == std::make_tuple(0u, 1024, 768), "idle resize reported a generation");
+    require(resizes.back() == std::make_pair(1024, 768), "idle resize reported the wrong size");
   }
   encoder.beginSession(32);
   const auto idle = frames.at(2);
-  require(idle.generation == 32 && idle.keyframe && idle.width == 1024 && idle.height == 768,
+  require(idle.generation == 32 && idle.sequence == 1 && idle.keyframe && idle.width == 1024 && idle.height == 768,
           "a session after an idle resize did not use the new size");
   encoder.stop();
   require(encoder.error().empty(), "resize produced a fatal error");
@@ -338,7 +337,7 @@ int main() {
     healthySource(); runtimeSize(1920, 1080); runtimeSize(1366, 768); runtimeSize(3840, 2160);
     runtimeSize(1280, 720, 120);
     fullScreenDamage(1920, 1080); fullScreenDamage(1366, 768);
-    identicalDamageRefines(); invalidSource(1); invalidSource(2); resizeEndsGeneration();
+    identicalDamageRefines(); invalidSource(1); invalidSource(2); resizeContinuesGeneration();
     std::puts("backend source: decoded fresh IDRs, damage, refinement, idle, shutdown, invalid frames and resize passed");
     return 0;
   } catch (const std::exception& error) {

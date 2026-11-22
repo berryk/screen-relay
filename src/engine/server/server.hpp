@@ -66,8 +66,6 @@ struct Server {
     uint32_t generation = 0, lastSequence = 0;
     uint16_t width = 0, height = 0;
     bool failed = false;
-    /// The desktop changed size during this generation; close with close_resized so the viewer reconnects.
-    bool resized = false;
     std::vector<uint8_t> received;
     CaptureEncoder capture;
     explicit Stream(Server& server);

@@ -1,5 +1,5 @@
 import {
-  CLOSE_RESIZED, CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, encodeResize, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
+  CLOSE_TAKEN, HID_KEYS, MAX_BYTES_IN_FLIGHT, encodeAck, encodeInput, encodeResize, h264Codec, isLoopback, parseMessage, socketTarget, validToken,
   type InputEvent, type Message,
 } from '../src/protocol/index.js';
 
@@ -48,6 +48,7 @@ const stats = ((window as any).nativeStats = {
 });
 let reconnectMode: 'automatic' | 'grant-ended' = 'automatic';
 let socket: WebSocket, decoder: VideoDecoder, retryTimer: any, deadline: any, frameHandle = 0, drawnThisFrame = false, transportBroken = false;
+let decoderSize = '';
 let generation = 0, sequence = 0, lastTimestamp = -1, ready = false, retry = 0, epoch = 0, takeRequested = false;
 let backlogSince: number | null = null, lastCatchUp = -Infinity;
 /** How far back the smallest arrival-minus-capture offset is searched, in ms. */
@@ -474,6 +475,14 @@ function retireDecoded() {
 function draw(item: any): boolean {
   try {
     if (item.gen !== generation) throw new Error('Stale decoded frame');
+    // The canvas follows the frame being drawn, so a mid-stream resize switches exactly at its keyframe.
+    const frameWidth = item.frame.displayWidth, frameHeight = item.frame.displayHeight;
+    if (frameWidth && frameHeight && (canvas.width !== frameWidth || canvas.height !== frameHeight)) {
+      canvas.width = frameWidth; canvas.height = frameHeight;
+      canvas.style.setProperty('--w', String(frameWidth)); canvas.style.setProperty('--h', String(frameHeight));
+      syncSize();
+      renderCursor();
+    }
     ctx.drawImage(item.frame, 0, 0, canvas.width, canvas.height);
   } catch (error: any) {
     item.frame.close();
@@ -647,6 +656,11 @@ function connect() {
         } as any);
         decoder = instance;
         decoder.configure(config);
+        decoderSize = `${width}x${height}`;
+      } else if (keyframe && decoderSize !== `${width}x${height}`) {
+        // The desktop was resized mid-stream. Frames already queued decode first; this keyframe starts the new size.
+        decoder.configure({ codec: h264Codec(data), codedWidth: width, codedHeight: height, optimizeForLatency: true });
+        decoderSize = `${width}x${height}`;
       }
       decoder.decode(
         new EncodedVideoChunk({ type: keyframe ? 'key' : 'delta', timestamp, data }),
@@ -666,13 +680,6 @@ function connect() {
     if (access !== 'owner' && e.code === 1008 && e.reason === 'grant ended') {
       reconnectMode = 'grant-ended';
       setStatus('Viewer link expired or was revoked');
-      return;
-    }
-    if (e.code === CLOSE_RESIZED) {
-      // The desktop changed size; the next generation streams it.
-      retry = 0;
-      setStatus('Resizing…');
-      retryTimer = setTimeout(connect, 0);
       return;
     }
     if (e.code === CLOSE_TAKEN) retry = 0;
@@ -957,13 +964,14 @@ function watchDpr() {
 }
 window.addEventListener('resize', watchDpr);
 // Ask the engine to match the desktop to this window. It applies only with
-// --allow-resize and only for the viewer that has control; it then closes the
-// stream with CLOSE_RESIZED and this viewer reconnects at the new size.
+// --allow-resize and only for the viewer that has control; the stream then
+// continues with a keyframe at the new size.
 // Ask once per reason (page load, window resize, taking control), not on every
-// reconnect: if another client resizes the desktop, follow it rather than
+// size change: if another client resizes the desktop, follow it rather than
 // resizing back, so two clients never ping-pong.
 const stage = document.querySelector('#stage') as HTMLElement;
 let resizeTimer: any, resizeWanted = true;
+
 function requestResize() {
   if (!resizeWanted || !ready || viewOnly || access === 'watch' || socket?.readyState !== WebSocket.OPEN) return;
   const even = (value: number, min: number) => Math.max(min, Math.min(16384, Math.floor(value / 2) * 2));

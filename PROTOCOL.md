@@ -54,7 +54,7 @@ The engine admits up to four `/stream` connections, with one input owner at a ti
 | `/stream?take=1` | Opens and owns input if a viewer slot is available or the current owner is a viewer it can replace. The previous input owner closes with code 4001 and reason `taken`. |
 | `/control` | Opens and owns input if input has no owner. Otherwise it opens and closes with code 4003 and reason `busy`. |
 
-When the desktop changes size, whether from a type 8 request or anything else such as `xrandr`, the engine closes each open `/stream` with code 4004 and reason `resized`. Reconnect at once; the next generation streams the new size. Input coordinates are fractions of the current size.
+When the desktop changes size, whether from a type 8 request or anything else such as `xrandr`, the stream continues in the same generation: the next frame is a keyframe with SPS and PPS whose width and height are the new size. A viewer reconfigures its decoder on a keyframe whose size differs from the previous frame's. Input coordinates are fractions of the current size.
 
 Adding `clipboard=1` to a supported stream URL does not change these rules. A refused `/stream` connection fails its WebSocket handshake, while a refused `/control` connection opens and closes with code 4003 and reason `busy` so a client can tell it apart from an unreachable engine. Held keys and buttons are released when a connection loses input. A browser that loses input to a takeover reconnects with `?view=1`.
 

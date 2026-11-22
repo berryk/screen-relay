@@ -362,7 +362,9 @@ export class Session {
       const absolute = (file: string) => (process.platform === 'win32' && file ? resolve(file) : file);
       engineCommand.push('--tls-cert', absolute(this.args['tls-cert']), '--tls-key', absolute(this.args['tls-key'] ?? ''));
     }
-    else if (this.args.public) engineCommand.push('--behind-tls-proxy');
+    // Fork: SCREEN_RELAY_BEHIND_PROXY=1 says a proxy on this machine fronts the engine without
+    // --public, so flow control must use viewer acknowledgements, not the loopback socket's TCP statistics.
+    else if (this.args.public || /^(1|true|yes|on)$/i.test(this.env.SCREEN_RELAY_BEHIND_PROXY ?? '')) engineCommand.push('--behind-tls-proxy');
     const scheme = this.args['tls-cert'] ? 'https' : 'http';
     const localUrl = `${scheme}://127.0.0.1:${this.args.port}`;
     this.save({ bind, localUrl, url: this.args.public || localUrl, tlsCert: this.args['tls-cert'] ? resolve(String(this.args['tls-cert'])) : null });

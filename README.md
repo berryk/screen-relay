@@ -4,8 +4,9 @@
 > on X11: start with `SCREEN_RELAY_ALLOW_RESIZE=1 screen-relay up ...` (engine flag
 > `--allow-resize`) and the viewer that has control resizes the desktop to its
 > window over RandR, on load, on window resize and on taking control. Any resize,
-> requested or not, restarts each stream at the new size (close code 4004), and X
-> errors no longer exit the engine. Works with Xvnc (TigerVNC, KasmVNC) displays
+> requested or not, continues each stream with a keyframe at the new size, and X
+> errors no longer exit the engine. `SCREEN_RELAY_BEHIND_PROXY=1` tells the engine
+> a local proxy fronts it without `--public`, so flow control uses acknowledgements. Works with Xvnc (TigerVNC, KasmVNC) displays
 > attached with `--display`. See `PROTOCOL.md` (message type 8).
 
 Desktop streaming and control for humans and AI agents: watch a desktop in a browser, and click, type, and take screenshots from the shell.

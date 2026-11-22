@@ -288,9 +288,8 @@ struct CaptureEncoder::Impl {
         if (source->drainDamage()) dirty = true;
         if (source->sizeChanged()) {
           // The desktop was resized: capture and encode at the new size from a fresh
-          // source and encoder. Frames carry their size, but a viewer only configures
-          // its decoder when a generation starts, so end the current one; the server
-          // closes that stream and the viewer reconnects at the new size.
+          // source and encoder. The session continues; its next frame is a keyframe
+          // that carries the new size, and the viewer reconfigures its decoder on it.
           {
             std::lock_guard<std::mutex> lock(mutex);
             if (stopping) break;
@@ -318,14 +317,8 @@ struct CaptureEncoder::Impl {
           r->init();
           dirty = true; force_idr = true; last_was_refinement = true;
           reset_refinement();
-          uint32_t ended = 0;
-          {
-            std::lock_guard<std::mutex> lock(mutex);
-            ended = active ? generation : 0;
-            active = false;
-          }
           std::fprintf(stderr, "capture: desktop resized to %dx%d\n", width, height);
-          if (resized) resized(ended, width, height);
+          if (resized) resized(width, height);
           continue;
         }
         uint32_t gen, seq;

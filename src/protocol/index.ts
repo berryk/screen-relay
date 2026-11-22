@@ -17,8 +17,6 @@ export const SUBPROTOCOL = 'nsl1';
 export const CLOSE_TAKEN = 4001;
 /** Close code for a /control socket refused because input is already owned. */
 export const CLOSE_BUSY = 4003;
-/** Close code for a /stream whose desktop changed size; reconnect at once to stream the new size. */
-export const CLOSE_RESIZED = 4004;
 export const MESSAGE_TYPES = { frame: 1, ack: 2, input: 3, controlReady: 4, inputResponse: 5, cursor: 6, clipboard: 7, resize: 8 } as const;
 export const INPUT_TYPES = { keyDown: 1, keyUp: 2, pointerMove: 3, buttonDown: 4, buttonUp: 5, wheel: 6, releaseAll: 7, text: 8 } as const;
 

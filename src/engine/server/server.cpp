@@ -77,9 +77,8 @@ backendFor(server.config.backend).capture, [this, &server](uint32_t gen, CursorI
   if (!generation || gen != generation) return;
   pending_cursor = std::move(cursor);
   lws_cancel_service(server.context);
-}, [this, &server](uint32_t gen, int w, int h) {
+}, [&server](int w, int h) {
   server.desktop_size = (uint32_t(w) << 16) | uint32_t(h);
-  { std::lock_guard<std::mutex> lock(mutex); if (gen && gen == generation) resized = true; }
   lws_cancel_service(server.context);
 }) {
   const auto& cfg = server.config;
@@ -95,7 +94,7 @@ void Server::Stream::begin(lws* wsi, uint32_t gen) {
 }
 void Server::Stream::end() {
   uint32_t old;
-  { std::lock_guard<std::mutex> lock(mutex); old = generation; generation = 0; pending.clear(); pending_cursor.reset(); flow.reset(); failed = false; resized = false; }
+  { std::lock_guard<std::mutex> lock(mutex); old = generation; generation = 0; pending.clear(); pending_cursor.reset(); flow.reset(); failed = false; }
   last_write_cursor = false;
   buffered_stream_bytes = 0; stream_notsent_lowat = 0; flow_timer_due_us = 0;
   if (old) capture.endSession(old);
@@ -374,12 +373,6 @@ int Server::Stream::write(bool proxy) {
   const bool send_notice = lastSequence && clipboard_pending;
   { std::lock_guard<std::mutex> lock(mutex);
     if (failed) return -1;
-    if (resized) {
-      static const char reason[] = "resized";
-      lws_close_reason(wsi, static_cast<lws_close_status>(close_resized),
-                       reinterpret_cast<unsigned char*>(const_cast<char*>(reason)), sizeof(reason) - 1);
-      return -1;
-    }
     if (!send_notice) {
       // Start with video to establish the generation; then share writes fairly.
       if (lastSequence && pending_cursor && (!last_write_cursor || pending.empty())) {
@@ -417,6 +410,8 @@ int Server::Stream::write(bool proxy) {
   }
   auto& f = *frame;
   if (f.generation != generation) return 0;
+  // A keyframe may change the stream's size (the desktop was resized); later frames must fit it.
+  if (f.keyframe) { width = f.width; height = f.height; }
   if (!frameMessage(wire, LWS_PRE, generation, lastSequence, f, width, height)) return -1;
   const size_t size = wire.size() - LWS_PRE;
   if (lws_write(wsi, wire.data() + LWS_PRE, size, LWS_WRITE_BINARY) != int(size)) return -1;
@@ -631,7 +626,7 @@ int callback(lws* wsi, lws_callback_reasons reason, void* user, void* in, size_t
             ",\"input_endpoint\":\"/input\",\"max_input_batch\":" + std::to_string(max_input_batch) +
             ",\"audio\":false,\"clipboard\":" + (s->clipboard.available() ? "true" : "false") +
             ",\"clipboard_endpoint\":\"/clipboard\",\"max_clipboard_bytes\":" + std::to_string(max_clipboard_bytes) +
-            ",\"resize\":false,\"ime\":false}";
+            ",\"resize\":" + (s->config.allow_resize && backendFor(s->config.backend).resize ? "true" : "false") + ",\"ime\":false}";
         return jsonResponse(wsi, response, HTTP_STATUS_OK, json);
       }
       std::string file; const char* mime = nullptr; const char* headers = nullptr; int headerCount = 0;
