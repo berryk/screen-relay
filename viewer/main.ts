@@ -749,6 +749,7 @@ if (clipboardSink) {
   });
 }
 canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch') { touchMove(e); return; }
   position(e);
   sendInput({ type: 'pointerMove', x, y });
 });
@@ -756,7 +757,81 @@ canvas.addEventListener('pointerleave', () => { pointerPosition = null; renderCu
 new ResizeObserver(renderCursor).observe(canvas);
 window.addEventListener('scroll', renderCursor, { passive: true });
 const buttonMap: Record<number, 1 | 2 | 3> = { 0: 1, 1: 2, 2: 3 };
+// Touch gestures. Tap: left click. Swipe with one or two fingers: scroll. Long press: right
+// click on release, or a left-button drag if the finger then moves.
+const TOUCH_SLOP = 10, TOUCH_HOLD_MS = 500, TOUCH_PIXELS_PER_NOTCH = 50;
+type Gesture = { id: number; mode: 'pending' | 'held' | 'scroll' | 'drag'; startX: number; startY: number; lastX: number; lastY: number; x: number; y: number; scroll: [number, number]; timer: any };
+let gesture: Gesture | null = null;
+const fingers = new Set<number>();
+function touchDown(e: PointerEvent) {
+  e.preventDefault();
+  if (!keyboardOpen) canvas.focus();
+  retryPendingRemoteCopy();
+  fingers.add(e.pointerId);
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  if (gesture) {
+    // A second finger turns a press that has not become a drag into a scroll.
+    if (gesture.mode === 'pending' || gesture.mode === 'held') { clearTimeout(gesture.timer); gesture.mode = 'scroll'; }
+    return;
+  }
+  position(e);
+  sendInput({ type: 'pointerMove', x, y });
+  const current: Gesture = { id: e.pointerId, mode: 'pending', startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, x, y, scroll: [0, 0], timer: 0 };
+  current.timer = setTimeout(() => {
+    if (gesture !== current || current.mode !== 'pending') return;
+    current.mode = 'held';
+    try { navigator.vibrate?.(15); } catch {}
+  }, TOUCH_HOLD_MS);
+  gesture = current;
+}
+function touchMove(e: PointerEvent) {
+  const g = gesture;
+  if (!g || e.pointerId !== g.id) return;
+  const moved = Math.hypot(e.clientX - g.startX, e.clientY - g.startY) > TOUCH_SLOP;
+  if (g.mode === 'pending' && moved) { clearTimeout(g.timer); g.mode = 'scroll'; }
+  if (g.mode === 'held' && moved) {
+    g.mode = 'drag';
+    buttons |= 1;
+    sendInput({ type: 'buttonDown', button: 1, x: g.x, y: g.y });
+  }
+  if (g.mode === 'scroll') {
+    // The content follows the finger: moving up scrolls down.
+    const delta = [g.lastY - e.clientY, g.lastX - e.clientX];
+    for (const axis of [0, 1] as const) {
+      g.scroll[axis] += delta[axis] / TOUCH_PIXELS_PER_NOTCH;
+      const whole = Math.trunc(g.scroll[axis]);
+      if (!whole) continue;
+      g.scroll[axis] -= whole;
+      sendInput({ type: 'wheel', axis: axis ? 'horizontal' : 'vertical', delta: clamp(whole * 120, -1200, 1200), x: g.x, y: g.y });
+    }
+  } else if (g.mode === 'drag') {
+    position(e);
+    sendInput({ type: 'pointerMove', x, y });
+  }
+  g.lastX = e.clientX; g.lastY = e.clientY;
+}
+function touchUp(e: PointerEvent, cancelled = false) {
+  fingers.delete(e.pointerId);
+  const g = gesture;
+  if (!g || e.pointerId !== g.id) return;
+  clearTimeout(g.timer);
+  gesture = null;
+  if (g.mode === 'drag') {
+    if (!cancelled) position(e);
+    buttons &= ~1;
+    sendInput({ type: 'buttonUp', button: 1, x, y });
+  } else if (!cancelled && (g.mode === 'pending' || g.mode === 'held')) {
+    const button = g.mode === 'held' ? 3 : 1;
+    buttons |= 1 << (button - 1);
+    sendInput({ type: 'buttonDown', button, x: g.x, y: g.y });
+    buttons &= ~(1 << (button - 1));
+    sendInput({ type: 'buttonUp', button, x: g.x, y: g.y });
+  }
+}
+// Stops the browser's own long-press, text selection and synthetic mouse events, which would also move focus off the keyboard input.
+canvas.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
 canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') { touchDown(e); return; }
   const button = buttonMap[e.button];
   if (!button) return;
   e.preventDefault();
@@ -768,6 +843,7 @@ canvas.addEventListener('pointerdown', (e) => {
   sendInput({ type: 'buttonDown', button, x, y });
 });
 canvas.addEventListener('pointerup', (e) => {
+  if (e.pointerType === 'touch') { touchUp(e); return; }
   const button = buttonMap[e.button];
   if (!button) return;
   e.preventDefault();
@@ -778,8 +854,12 @@ canvas.addEventListener('pointerup', (e) => {
     canvas.releasePointerCapture(e.pointerId);
   }
 });
-canvas.addEventListener('pointercancel', release);
-canvas.addEventListener('lostpointercapture', () => {
+canvas.addEventListener('pointercancel', (e) => {
+  if ((e as PointerEvent).pointerType === 'touch') { touchUp(e as PointerEvent, true); return; }
+  release();
+});
+canvas.addEventListener('lostpointercapture', (e) => {
+  if ((e as PointerEvent).pointerType === 'touch') return;
   if (buttons) release();
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1042,7 +1122,54 @@ function syncStatus() {
 }
 new MutationObserver(syncStatus).observe(status, { childList: true, characterData: true, subtree: true });
 syncStatus();
-toggle.addEventListener('click', () => setExpanded(actions.hidden));
+// The toolbar docks to the left (default), right or top edge. Drag its dot to move it.
+type Dock = { side: 'left' | 'right' | 'top'; at: number };
+function readDock(): Dock {
+  try {
+    const saved = JSON.parse(stored('relay.dock') || 'null');
+    if (saved && ['left', 'right', 'top'].includes(saved.side) && Number.isFinite(saved.at)) return { side: saved.side, at: clamp(saved.at, 0.08, 0.92) };
+  } catch {}
+  return { side: 'left', at: 0.5 };
+}
+let dock = readDock();
+function applyDock() {
+  toolbar.classList.toggle('dock-left', dock.side === 'left');
+  toolbar.classList.toggle('dock-right', dock.side === 'right');
+  toolbar.classList.toggle('dock-top', dock.side === 'top');
+  (toolbar as HTMLElement).style.setProperty('--at', String(dock.at));
+}
+applyDock();
+let toolbarDrag: { id: number; x: number; y: number; moved: boolean } | null = null, swallowToggleClick = false;
+toggle.addEventListener('pointerdown', (e) => {
+  const p = e as PointerEvent;
+  toolbarDrag = { id: p.pointerId, x: p.clientX, y: p.clientY, moved: false };
+  try { (toggle as HTMLElement).setPointerCapture(p.pointerId); } catch {}
+});
+toggle.addEventListener('pointermove', (e) => {
+  const p = e as PointerEvent, drag = toolbarDrag;
+  if (!drag || p.pointerId !== drag.id) return;
+  if (!drag.moved && Math.hypot(p.clientX - drag.x, p.clientY - drag.y) < 8) return;
+  drag.moved = true;
+  const view = window.visualViewport, width = view?.width || window.innerWidth, height = view?.height || window.innerHeight;
+  const px = p.clientX / width, py = (p.clientY - (view?.offsetTop || 0)) / height;
+  const side = px < 0.25 ? 'left' : px > 0.75 ? 'right' : py < 0.3 ? 'top' : px < 0.5 ? 'left' : 'right';
+  dock = { side, at: clamp(side === 'top' ? px : py, 0.08, 0.92) };
+  applyDock();
+});
+function endToolbarDrag(e: Event) {
+  const drag = toolbarDrag;
+  if (!drag || (e as PointerEvent).pointerId !== drag.id) return;
+  toolbarDrag = null;
+  if (!drag.moved) return;
+  swallowToggleClick = true;
+  store('relay.dock', JSON.stringify(dock));
+}
+toggle.addEventListener('pointerup', endToolbarDrag);
+toggle.addEventListener('pointercancel', endToolbarDrag);
+toggle.addEventListener('click', () => {
+  if (swallowToggleClick) { swallowToggleClick = false; return; }
+  setExpanded(actions.hidden);
+});
 canvas.addEventListener('pointerdown', () => showPanel(null));
 const toolbarActions: Record<string, (button: Element) => void> = {
   fullscreen: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen())
@@ -1050,6 +1177,7 @@ const toolbarActions: Record<string, (button: Element) => void> = {
   scale: () => showPanel('scale'),
   clipboard: () => showPanel('clipboard'),
   keys: () => showPanel('keys'),
+  keyboard: () => setKeyboard(!keyboardOpen),
   connection: () => showPanel('connection'),
   screenshot: () => canvas.toBlob((blob) => {
     if (!blob) return;
@@ -1095,14 +1223,20 @@ panels.scale.addEventListener('click', (e) => {
   else setScale((button as HTMLElement).dataset.scale!);
 });
 function keepCanvasFocus(e: Event) {
-  if ((e.target as Element).closest('[data-hold]') || (e.target as Element).closest('[data-keys]') || (e.target as Element).closest('#meta-ctrl')) e.preventDefault();
+  if ((e.target as Element).closest('[data-hold]') || (e.target as Element).closest('[data-keys]') || (e.target as Element).closest('[data-keyboard]') || (e.target as Element).closest('#meta-ctrl')) e.preventDefault();
+}
+/** Returns focus to where typing goes: the on-screen keyboard's input while it is open, else the canvas. */
+function refocus() {
+  if (keyboardOpen && kbd) kbd.focus({ preventScroll: true });
+  else canvas.focus();
 }
 panels.keys.addEventListener('pointerdown', keepCanvasFocus);
 panels.keys.addEventListener('mousedown', keepCanvasFocus);
-panels.keys.addEventListener('click', (e) => {
+function keyButtonClick(e: Event) {
+  if ((e.target as Element).closest('[data-keyboard]')) { setKeyboard(false); return; }
   if ((e.target as Element).closest('#meta-ctrl')) {
     toggleMeta();
-    canvas.focus();
+    refocus();
     return;
   }
   const hold = (e.target as Element).closest('[data-hold]');
@@ -1112,7 +1246,7 @@ panels.keys.addEventListener('click', (e) => {
       latched.set(code, hold);
       hold.setAttribute('aria-pressed', 'true');
     }
-    canvas.focus();
+    refocus();
     return;
   }
   const button = (e.target as Element).closest('[data-keys]');
@@ -1123,8 +1257,97 @@ panels.keys.addEventListener('click', (e) => {
   for (const code of pressed.reverse()) releaseKey(code);
   if (codes.some((code) => code < 224)) releaseLatched();
   showPanel(null);
-  canvas.focus();
-});
+  refocus();
+}
+panels.keys.addEventListener('click', keyButtonClick);
+
+// On-screen keyboard for touch devices. A hidden text input takes focus so the system
+// keyboard opens; what is typed into it is sent as text, and deletions as Backspace.
+// A shortcut bar sits above the keyboard, and the stage shrinks to the visible area.
+const kbd = document.querySelector('#kbd') as HTMLTextAreaElement | null;
+const shortcuts = document.querySelector('#shortcuts') as HTMLElement | null;
+const keyboardButton = actions.querySelector('[data-action="keyboard"]') as HTMLElement | null;
+// The input always starts with this, so a Backspace has something to delete. Newlines keep
+// the system keyboard from joining typed words to it.
+const KBD_BASE = '\n\n';
+let keyboardOpen = false, kbdPrevious = KBD_BASE, kbdComposing = false;
+function resetKbd() {
+  if (!kbd) return;
+  kbd.value = kbdPrevious = KBD_BASE;
+  try { kbd.setSelectionRange(KBD_BASE.length, KBD_BASE.length); } catch {}
+}
+function tapKey(code: number) {
+  if (holdKey(code)) releaseKey(code);
+}
+function kbdInput() {
+  if (!kbd) return;
+  const before = Array.from(kbdPrevious), after = Array.from(kbd.value);
+  let same = 0;
+  while (same < before.length && same < after.length && before[same] === after[same]) same++;
+  for (let i = before.length; i > same; i--) tapKey(keys.Backspace);
+  for (const character of after.slice(same)) {
+    if (character === '\n') tapKey(keys.Enter);
+    else sendInput({ type: 'text', codepoint: character.codePointAt(0)! });
+  }
+  if (before.length !== same || after.length !== same) releaseLatched();
+  kbdPrevious = kbd.value;
+  if (!kbdComposing && (kbd.value.length > 48 || !kbd.value.startsWith(KBD_BASE))) resetKbd();
+}
+function syncViewport() {
+  const root = document.documentElement.style, view = window.visualViewport;
+  const bar = keyboardOpen && shortcuts ? shortcuts.offsetHeight || 0 : 0;
+  if (view) {
+    // A pinch zoom also changes the visual viewport; only follow the keyboard and browser bars.
+    if (Math.abs(view.scale - 1) > 0.01) return;
+    root.setProperty('--vw', `${view.width}px`);
+    root.setProperty('--vh', `${Math.max(120, view.height - bar)}px`);
+    root.setProperty('--vt', `${view.offsetTop}px`);
+  } else if (bar) root.setProperty('--vh', `${window.innerHeight - bar}px`);
+  else root.setProperty('--vh', '100dvh');
+}
+function setKeyboard(open: boolean) {
+  if (!kbd || keyboardOpen === open) return;
+  keyboardOpen = open;
+  if (shortcuts) shortcuts.hidden = !open;
+  keyboardButton?.setAttribute('aria-pressed', String(open));
+  if (open) {
+    resetKbd();
+    showPanel(null);
+    kbd.focus({ preventScroll: true });
+  } else {
+    releaseLatched();
+    if (document.activeElement === kbd) kbd.blur();
+  }
+  syncViewport();
+  resizeWanted = true;
+  scheduleResize();
+}
+if (kbd) {
+  kbd.addEventListener('input', kbdInput);
+  kbd.addEventListener('compositionstart', () => { kbdComposing = true; });
+  kbd.addEventListener('compositionend', () => { kbdComposing = false; kbdInput(); });
+  // Printable keys arrive as text through the input event, which carries case and symbols for
+  // on-screen and hardware keyboards alike. Everything else is sent as a key.
+  kbd.addEventListener('keydown', (e) => {
+    const k = e as KeyboardEvent;
+    if (k.key === 'Shift' || (k.key?.length === 1 && !k.ctrlKey && !k.altKey && !k.metaKey)) return;
+    handleKeyDown(k);
+  });
+  kbd.addEventListener('keyup', handleKeyUp);
+  kbd.addEventListener('blur', () => { if (keyboardOpen && !focusingSink) setKeyboard(false); });
+}
+if (shortcuts) {
+  shortcuts.addEventListener('pointerdown', keepCanvasFocus);
+  shortcuts.addEventListener('mousedown', keepCanvasFocus);
+  shortcuts.addEventListener('click', keyButtonClick);
+}
+if (keyboardButton) keyboardButton.hidden = !((navigator?.maxTouchPoints ?? 0) > 0);
+if (window.visualViewport) {
+  const follow = () => { syncViewport(); resizeWanted = true; scheduleResize(); };
+  window.visualViewport.addEventListener('resize', follow);
+  window.visualViewport.addEventListener('scroll', syncViewport);
+  syncViewport();
+}
 function replaceAccess(value: string, next: Access) {
   clipboardAvailable = false;
   accessToken = value;

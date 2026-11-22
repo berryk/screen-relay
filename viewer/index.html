@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>screen-relay</title>
 <link rel="icon" href="data:,">
 <style>
@@ -10,14 +10,32 @@
 html,body{margin:0;height:100%;overflow:hidden;background:#000}
 body{font:13px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;color:#ededed}
 [hidden]{display:none!important}
-#stage{position:fixed;inset:0;display:flex;overflow:hidden}
+/* --vw, --vh and --vt follow the visual viewport (set by the viewer), so the stage is the area an on-screen keyboard leaves visible. */
+#stage{position:fixed;left:0;top:var(--vt,0px);width:var(--vw,100vw);height:100vh;height:var(--vh,100dvh);display:flex;overflow:hidden}
 #screen{--w:1280;--h:720;display:block;margin:auto;flex:none;background:#000;outline:none;touch-action:none;cursor:default;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   width:min(100vw,calc(100vh*var(--w)/var(--h)));height:min(100vh,calc(100vw*var(--h)/var(--w)));
-  width:min(100vw,calc(100dvh*var(--w)/var(--h)));height:min(100dvh,calc(100vw*var(--h)/var(--w)))}
+  width:min(var(--vw,100vw),calc(var(--vh,100dvh)*var(--w)/var(--h)));height:min(var(--vh,100dvh),calc(var(--vw,100vw)*var(--h)/var(--w)))}
 body.actual #stage{overflow:auto}
 #cursor{position:fixed;pointer-events:none;z-index:1}
 #clipboard-sink{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0;resize:none}
-#toolbar{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:6px}
+#toolbar{position:fixed;top:calc(var(--vt,0px) + 8px);left:calc(var(--vw,100vw)*var(--at,.5));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:6px}
+/* Docked to a side: a vertical bar, with panels opening beside it. --at is the position along the edge, 0 to 1. */
+#toolbar.dock-left,#toolbar.dock-right{top:calc(var(--vt,0px) + var(--vh,100vh)*var(--at,.5));transform:translateY(-50%);align-items:center}
+#toolbar.dock-left{left:8px;flex-direction:row}
+#toolbar.dock-right{left:auto;right:8px;flex-direction:row-reverse}
+#toolbar.dock-left .bar,#toolbar.dock-right .bar,#toolbar.dock-left #toolbar-actions,#toolbar.dock-right #toolbar-actions{flex-direction:column}
+#toolbar.dock-left .bar,#toolbar.dock-right .bar{border-radius:18px;max-height:calc(var(--vh,100vh) - 16px);overflow-y:auto;scrollbar-width:none}
+#toolbar.dock-left .divider,#toolbar.dock-right .divider{width:16px;height:1px;margin:3px 0}
+#toolbar.dock-left #status,#toolbar.dock-right #status{display:none}
+#toolbar.dock-left .panel,#toolbar.dock-right .panel{flex-direction:column;align-items:stretch;max-height:calc(var(--vh,100vh) - 16px);overflow-y:auto}
+#toolbar.dock-left #keys-panel,#toolbar.dock-right #keys-panel{flex-direction:row;max-width:min(70vw,320px)}
+#toolbar-toggle{touch-action:none;cursor:grab}
+#kbd{position:fixed;left:0;top:var(--vt,0px);width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0;resize:none;font-size:16px}
+#shortcuts{position:fixed;left:0;top:calc(var(--vt,0px) + var(--vh,100dvh));width:var(--vw,100vw);z-index:3;display:flex;gap:6px;padding:6px;
+  border-radius:0;border-width:1px 0 0;overflow-x:auto;scrollbar-width:none;touch-action:pan-x}
+#shortcuts button{flex:none;min-width:40px;padding:10px 12px}
+@media (pointer:coarse){.bar button{width:38px;height:38px}.panel button{padding:10px 12px}}
 .bar,.panel{background:rgba(12,12,12,.86);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
   border:1px solid rgba(255,255,255,.12);box-shadow:0 8px 24px rgba(0,0,0,.45)}
 .bar{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;transition:opacity .15s}
@@ -48,6 +66,28 @@ button:focus-visible,input:focus-visible{outline:2px solid #3b82f6;outline-offse
 <body>
 <main id="stage"><canvas id="screen" width="1280" height="720" tabindex="0" aria-label="Remote desktop. Focus to send keyboard and pointer input."></canvas></main>
 <canvas id="cursor" width="1" height="1" aria-hidden="true" hidden></canvas>
+<textarea id="kbd" aria-label="On-screen keyboard input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="enter" tabindex="-1"></textarea>
+<div id="shortcuts" class="panel" role="group" aria-label="Shortcut keys" hidden>
+  <button type="button" data-keys="Escape">Esc</button>
+  <button type="button" data-keys="Tab">Tab</button>
+  <button type="button" data-hold="ControlLeft" aria-pressed="false" aria-label="Hold Ctrl">Ctrl</button>
+  <button type="button" data-hold="AltLeft" aria-pressed="false" aria-label="Hold Alt">Alt</button>
+  <button type="button" data-hold="ShiftLeft" aria-pressed="false" aria-label="Hold Shift">Shift</button>
+  <button type="button" data-keys="ArrowLeft" aria-label="Left">←</button>
+  <button type="button" data-keys="ArrowDown" aria-label="Down">↓</button>
+  <button type="button" data-keys="ArrowUp" aria-label="Up">↑</button>
+  <button type="button" data-keys="ArrowRight" aria-label="Right">→</button>
+  <button type="button" data-keys="Home">Home</button>
+  <button type="button" data-keys="End">End</button>
+  <button type="button" data-keys="PageUp">PgUp</button>
+  <button type="button" data-keys="PageDown">PgDn</button>
+  <button type="button" data-keys="Delete">Del</button>
+  <button type="button" data-keys="ControlLeft+KeyA">Ctrl+A</button>
+  <button type="button" data-keys="ControlLeft+KeyC">Ctrl+C</button>
+  <button type="button" data-keys="ControlLeft+KeyV">Ctrl+V</button>
+  <button type="button" data-keys="ControlLeft+KeyZ">Ctrl+Z</button>
+  <button type="button" data-keyboard="close" aria-label="Hide keyboard">Hide</button>
+</div>
 <textarea id="clipboard-sink" aria-hidden="true" tabindex="-1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <div id="stats" hidden><span id="hud" aria-label="Stream statistics">Stream 1280x720 · Drawn FPS: 0.0 · Stream Mbps: 0.00 · Cgroup CPU (one core): unavailable · Cgroup RAM: unavailable</span></div>
 <nav id="toolbar" aria-label="Viewer controls">
@@ -58,6 +98,7 @@ button:focus-visible,input:focus-visible{outline:2px solid #3b82f6;outline-offse
       <span class="divider"></span>
       <button type="button" data-action="fullscreen" aria-pressed="false" aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
       <button type="button" data-action="scale" aria-expanded="false" aria-controls="scale-panel" aria-label="Scaling" title="Scaling"><svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
+      <button type="button" data-action="keyboard" aria-pressed="false" aria-label="On-screen keyboard" title="On-screen keyboard" hidden><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="11" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 11.5h8M9 19l3 2.5 3-2.5"/></svg></button>
       <button type="button" data-action="keys" aria-expanded="false" aria-controls="keys-panel" aria-label="Send keys" title="Send keys"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
       <button type="button" data-action="screenshot" aria-label="Save screenshot" title="Save screenshot"><svg viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/></svg></button>
       <button type="button" data-action="clipboard" aria-expanded="false" aria-controls="clipboard-panel" aria-label="Clipboard" title="Clipboard" hidden><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
