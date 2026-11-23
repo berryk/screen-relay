@@ -8,6 +8,12 @@
 > errors no longer exit the engine. `SCREEN_RELAY_BEHIND_PROXY=1` tells the engine
 > a local proxy fronts it without `--public`, so flow control uses acknowledgements. Works with Xvnc (TigerVNC, KasmVNC) displays
 > attached with `--display`. See `PROTOCOL.md` (message type 8).
+>
+> For a steady stream (scrolling, video) the viewer draws the newest frame each
+> refresh instead of queueing up to two, and caps its smoothing delay at 15 ms;
+> `?fresh=0&hold=100` restores upstream's behaviour. `SCREEN_RELAY_MOTION_CRF=24`
+> (engine `--motion-crf`) sends coarser frames while the screen changes and
+> refines once it is still. `?desync=1` requests a low-latency canvas.
 
 Desktop streaming and control for humans and AI agents: watch a desktop in a browser, and click, type, and take screenshots from the shell.
 

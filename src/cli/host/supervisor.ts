@@ -346,6 +346,8 @@ export class Session {
     if (this.args.output) engineCommand.push('--output', this.args.output);
     // Fork: let the viewer with control resize the X desktop to its window.
     if (backend === 'x11' && /^(1|true|yes|on)$/i.test(this.env.SCREEN_RELAY_ALLOW_RESIZE ?? '')) engineCommand.push('--allow-resize');
+    // Fork: coarser quality while the screen changes (still frames always refine), to send less during motion.
+    if (/^\d+(\.\d+)?$/.test(this.env.SCREEN_RELAY_MOTION_CRF ?? '')) engineCommand.push('--motion-crf', this.env.SCREEN_RELAY_MOTION_CRF!);
     if (bind !== '127.0.0.1' || this.args.public || this.args['allow-origin'] || attaches(backend)) {
       token = randomBytes(32).toString('hex');
       const tokenFile = join(this.dir, 'token');

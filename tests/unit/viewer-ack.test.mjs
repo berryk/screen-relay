@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { createContext, runInContext } from 'node:vm';
 
-function viewer({ devicePixelRatio = 1, storage, decode = true, deferDecode = false, fetch = async () => ({ ok: false, status: 401 }), navigator, hash = '' } = {}) {
+function viewer({ devicePixelRatio = 1, storage, decode = true, deferDecode = false, fetch = async () => ({ ok: false, status: 401 }), navigator, hash = '', search = '?fresh=0&hold=100' } = {}) {
+  // The default search selects upstream's presenter (queue of two, hold up to 100 ms), which most tests here describe.
   const listeners = {}, windowListeners = {}, elements = {}, sockets = [], trace = [], animationFrames = new Map(), timers = [];
   const decodeQueue = [];
   let now = 0, nextAnimationFrame = 1;
@@ -70,7 +71,7 @@ function viewer({ devicePixelRatio = 1, storage, decode = true, deferDecode = fa
   document.activeElement = document.body;
   const context = createContext({
     document, window: { devicePixelRatio, VideoDecoder: Decoder, EncodedVideoChunk: true, addEventListener: (name, callback) => { windowListeners[name] = callback; } },
-    location: { protocol: 'http:', hostname: 'localhost', host: 'localhost', hash, pathname: '/', search: '' },
+    location: { protocol: 'http:', hostname: 'localhost', host: 'localhost', hash, pathname: '/', search },
     history: { replaceState() {} },
     URL, URLSearchParams, AbortSignal, WebSocket: Socket, VideoDecoder: Decoder,
     EncodedVideoChunk: class { constructor(options) { Object.assign(this, options); } },
@@ -173,6 +174,20 @@ test('a burst of six frames draws in order across six animation frames', () => {
   assert.deepEqual(traced(app, 'draw'), [1, 2, 3, 4, 5, 6, 7, 8]);
   app.tick(128);
   assert.deepEqual(app.trace.slice(-3), [['draw', 9], ['close', 9], ['ack', 9]]);
+});
+
+test('by default a burst draws the newest frame each refresh and drops the ones waiting behind it', () => {
+  const app = viewer({ search: '' });
+  app.frame(1);
+  for (let sequence = 2; sequence <= 7; sequence++) app.frame(sequence);
+  assert.deepEqual(traced(app, 'draw'), [1]);
+  app.tick(16);
+  assert.deepEqual(traced(app, 'draw'), [1, 7]);
+  assert.equal(app.context.window.nativeStats.superseded, 5);
+  assert.deepEqual(traced(app, 'ack'), [1, 2, 3, 4, 5, 6, 7]);
+  app.tick(32);
+  app.frame(8);
+  assert.deepEqual(app.trace.slice(-3), [['draw', 8], ['close', 8], ['ack', 8]]);
 });
 
 test('sustained backlog skips at most once every 250 ms after 500 ms', () => {

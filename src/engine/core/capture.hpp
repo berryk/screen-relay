@@ -30,6 +30,9 @@ struct CaptureStats {
 struct CaptureSettings {
   unsigned fps;
   uint64_t min_bitrate, start_bitrate, max_bitrate;
+  /// Fork: quality (x264 CRF) for frames sent while the screen changes. Still frames always refine to the
+  /// base quality, so a higher value trades sharpness during motion for smaller, faster frames.
+  float motion_crf = 10;
 };
 
 class CaptureEncoder {

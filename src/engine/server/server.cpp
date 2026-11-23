@@ -71,7 +71,7 @@ Server::Stream::Stream(Server& server) : capture([this, &server](EncodedFrame&& 
   pending.push_back(std::move(frame));
   lws_cancel_service(server.context);
   return true;
-}, CaptureSettings{server.config.fps, server.config.bitrate_min, server.config.bitrate_start, server.config.bitrate_max},
+}, CaptureSettings{server.config.fps, server.config.bitrate_min, server.config.bitrate_start, server.config.bitrate_max, server.config.motion_crf},
 backendFor(server.config.backend).capture, [this, &server](uint32_t gen, CursorImage&& cursor) {
   std::lock_guard<std::mutex> lock(mutex);
   if (!generation || gen != generation) return;

@@ -5,7 +5,8 @@ import {
 
 const keys = HID_KEYS;
 const canvas = document.querySelector('#screen') as HTMLCanvasElement,
-  ctx = canvas.getContext('2d')!,
+  // `?desync=1` asks the browser to present the canvas without waiting for the page compositor, where it can.
+  ctx = canvas.getContext('2d', new URLSearchParams(location.search).get('desync') === '1' ? { desynchronized: true } : undefined)!,
   status = document.querySelector('#status')!;
 const cursor = document.querySelector('#cursor') as HTMLCanvasElement, cursorContext = cursor.getContext('2d')!;
 const clipboardSink = document.querySelector('#clipboard-sink') as HTMLTextAreaElement | null;
@@ -45,6 +46,8 @@ function receiveCursor({ generation: gen, width, height, hotX, hotY, pixels }: E
 }
 const stats = ((window as any).nativeStats = {
   received: 0, drawn: 0, superseded: 0, holdMs: 0, bytes: 0, decodeerrors: 0, outstanding: 0, pendingBytes: 0, pendingHighWater: 0,
+  /** Totals in ms from a frame's arrival to its decode and to its acknowledgement (drawn or dropped), and how many were acknowledged. */
+  decodeMsTotal: 0, waitMsTotal: 0, acked: 0,
 });
 let reconnectMode: 'automatic' | 'grant-ended' = 'automatic';
 let socket: WebSocket, decoder: VideoDecoder, retryTimer: any, deadline: any, frameHandle = 0, drawnThisFrame = false, transportBroken = false;
@@ -58,7 +61,28 @@ const JITTER_WINDOW_MS = 2000;
 /** Share of recent arrivals the hold must cover. */
 const JITTER_QUANTILE = 0.95;
 /** Longest hold in ms; a longer hold smooths more but delays what the user sees after typing. */
-const MAX_HOLD_MS = 100;
+const MAX_HOLD_MS = holdLimit();
+/**
+ * Fork: by default the viewer draws the newest frame each refresh and drops older ones still waiting, so a
+ * steady stream (scrolling, video) is not shown a frame or two late. `?fresh=0` restores the queue of up to two
+ * frames, which evens out motion on a very uneven link. Remembered per browser.
+ */
+const FRESHEST = (() => {
+  const given = new URLSearchParams(location.search).get('fresh');
+  try { if (given !== null) localStorage.setItem('relay.fresh', given); } catch {}
+  let value = given;
+  try { value ??= localStorage.getItem('relay.fresh'); } catch {}
+  return value !== '0';
+})();
+/** Fork: the smoothing delay is capped at 15 ms by default (upstream: 100). `?hold=N` sets the cap, 0 to 100: lower answers input sooner, higher evens out frame timing. Remembered per browser. */
+function holdLimit(): number {
+  const given = new URLSearchParams(location.search).get('hold');
+  try { if (given !== null) localStorage.setItem('relay.hold', given); } catch {}
+  let value = given;
+  try { value ??= localStorage.getItem('relay.hold'); } catch {}
+  const n = value === null || value === '' ? NaN : Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 15;
+}
 /** Milliseconds the hold shrinks per millisecond that passes. */
 const HOLD_DECAY = 0.05;
 /** Change in the offset, in ms, that restarts the clock. */
@@ -461,7 +485,9 @@ function schedulePresent() {
 function ackFrame(item: any): boolean {
   try {
     if (socket?.readyState !== WebSocket.OPEN) throw new Error('Connection closed before ACK');
-    socket.send(encodeAck(item.gen, item.seq, performance.now() - item.arrived));
+    const waited = performance.now() - item.arrived;
+    socket.send(encodeAck(item.gen, item.seq, waited));
+    stats.waitMsTotal += waited; stats.acked++;
     return true;
   } catch (error: any) {
     fail(`ACK failed: ${error.message}`);
@@ -512,6 +538,18 @@ function presenterPhase(due: number, draws: number, backlogMs: number, sinceCatc
 }
 function trimDecoded(now: number, draws = 0): boolean {
   let due = dueCount(now);
+  if (FRESHEST) {
+    // Low-latency mode: never let a due frame wait behind another; keep only the newest one to draw.
+    while (due > 1) {
+      const dropped = decoded.shift();
+      dropped.frame.close();
+      stats.superseded++;
+      due--;
+      if (!ackFrame(dropped)) return false;
+    }
+    backlogSince = null;
+    return true;
+  }
   const phase = presenterPhase(
     due, draws, now - (backlogSince ?? now), now - lastCatchUp, decoded.length ? now - decoded[0].arrived - holdMs : 0,
   );
@@ -642,6 +680,7 @@ function connect() {
               stats.pendingBytes -= item.bytes;
               stats.outstanding = pending.size;
               item.frame = frame;
+              stats.decodeMsTotal += performance.now() - item.arrived;
               if (!presentDecoded(item)) return;
               watchPending(current);
             } catch (error: any) {

@@ -114,6 +114,7 @@ struct Resources {
   bool frame_allocated = false;
   uint64_t bitrate;
   bool wide_vbv = false;
+  float crf = encoder_crf;
   Resources(PixelFormat f, int w, int h, CaptureSettings s)
       : format(f), width(w), height(h), settings(s),
         mb_info(size_t((w + 15) / 16) * size_t((h + 15) / 16)),
@@ -146,6 +147,7 @@ struct Resources {
     require(codec, "opening libx264 failed");
     bitrate = settings.start_bitrate;
     wide_vbv = true;
+    crf = encoder_crf;
   }
   void init() {
     openEncoder();
@@ -401,14 +403,18 @@ struct CaptureEncoder::Impl {
             const int64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(capture_start.time_since_epoch()).count();
             r->frame.i_pts = last_pts = std::max(last_pts + 1, timestamp);
             const bool wide_vbv = refinement || force_idr;
-            if (rate != r->bitrate || wide_vbv != r->wide_vbv) {
+            // Fork: frames sent during motion may use a coarser quality; refinement and keyframes use the base.
+            const float crf = wide_vbv ? encoder_crf : std::max(encoder_crf, settings.motion_crf);
+            if (rate != r->bitrate || wide_vbv != r->wide_vbv || crf != r->crf) {
               x264_param_t params;
               x264_encoder_parameters(r->codec, &params);
+              params.rc.f_rf_constant = crf;
               params.rc.i_vbv_max_bitrate = int(rate / 1000);
               params.rc.i_vbv_buffer_size = vbvBufferKbit(rate, settings.fps, wide_vbv);
               require(x264_encoder_reconfig(r->codec, &params) == 0, "encoder reconfiguration failed");
               r->bitrate = rate;
               r->wide_vbv = wide_vbv;
+              r->crf = crf;
             }
             r->frame.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
             r->frame.prop.mb_info = nullptr; r->frame.prop.mb_info_free = nullptr;

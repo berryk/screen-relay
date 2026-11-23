@@ -296,6 +296,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
       std::cout << "Usage: relay-engine [--bind ADDRESS] [--port PORT] [--viewer-dir DIR]\n"
                    "  [--backend NAME] [--output NAME] [--check] [--allow-resize]\n"
                    "  [--fps N] [--bitrate-min BPS] [--bitrate-start BPS] [--bitrate-max BPS]\n"
+                   "  [--motion-crf 10-40]\n"
                    "  [--token-file FILE [--public-origin https://HOST[:PORT]]\n"
                    "    [--allow-origin ORIGIN[,...]]]\n"
                    "  [--tls-cert FILE --tls-key FILE | --behind-tls-proxy]\n"
@@ -308,6 +309,7 @@ bool parseConfig(int argc, char** argv, Config& config) {
                    "origin is a lowercase https://HOST[:PORT] origin, or http://localhost[:PORT] or\n"
                    "http://127.0.0.1[:PORT] for a page served on the machine itself.\n"
                    "--check initializes the backend and exits without starting capture or the server.\n"
+                   "--motion-crf lowers quality while the screen changes (default 10, the still quality).\n"
                    "--allow-resize lets the viewer that owns input resize the desktop to its window (X11).\n"
                    "Attach to DISPLAY using the caller's XAUTHORITY. Defaults: 127.0.0.1:8080, 60 fps,\n"
                    "1000000/8000000/40000000 bps.\n"
@@ -335,6 +337,10 @@ bool parseConfig(int argc, char** argv, Config& config) {
     } else if (option == "--bitrate-min") config.bitrate_min = bitrate(value);
     else if (option == "--bitrate-start") config.bitrate_start = bitrate(value);
     else if (option == "--bitrate-max") config.bitrate_max = bitrate(value);
+    else if (option == "--motion-crf") {
+      config.motion_crf = std::stof(value);
+      if (!(config.motion_crf >= 10 && config.motion_crf <= 40)) throw std::runtime_error("--motion-crf must be 10 to 40");
+    }
     else if (option == "--viewer-dir") config.viewer = value;
     else if (option == "--public-origin") {
       config.authority = value.rfind("https://", 0) == 0 ? httpsAuthority(value.substr(8)) : std::string{};
